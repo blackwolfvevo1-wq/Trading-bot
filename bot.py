@@ -19,8 +19,9 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-BOT_TOKEN = os.getenv("8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU")
-CHAT_ID = os.getenv("CHAT_ID", "6937661753")
+# التوكن والـ ID محطوطين ديركت باش نتجاوزو مشكلة Render
+BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
+CHAT_ID = "6937661753"
 
 BINANCE_URL = "https://fapi.binance.com"
 COINGECKO_URL = "https://api.coingecko.com/api/v3"
@@ -28,11 +29,6 @@ FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
 ALERT_INTERVAL = 300
 ALERT_COOLDOWN = 1800
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN موش موجود في Render Environment Variables"
-    )
 
 # =========================================================
 # RENDER WEB SERVER
