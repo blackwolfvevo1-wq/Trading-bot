@@ -18,8 +18,8 @@ from telegram.ext import (
 # الإعدادات
 # =========================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+TELEGRAM_TOKEN = '8829847415:AAGqU-VGZ--S_dohigg6I_bS65F3-GGgYa8'
+CHAT_ID = '6937661753'
 
 BINANCE_FUTURES = "https://fapi.binance.com"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
