@@ -1,116 +1,86 @@
 import os
+import asyncio
 import threading
+import time
 import requests
 import pandas as pd
 import numpy as np
 
 from flask import Flask
-
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
-
 # =========================================================
-# الإعدادات
+# CONFIG
 # =========================================================
 
-TELEGRAM_TOKEN = '8829847415:AAGqU-VGZ--S_dohigg6I_bS65F3-GGgYa8'
-CHAT_ID = '6937661753'
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "6937661753")
 
-BINANCE_FUTURES = "https://fapi.binance.com"
-COINGECKO_API = "https://api.coingecko.com/api/v3"
-FEAR_GREED_API = "https://api.alternative.me/fng/"
+BINANCE_URL = "https://fapi.binance.com"
+COINGECKO_URL = "https://api.coingecko.com/api/v3"
+FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
+ALERT_INTERVAL = 300
+ALERT_COOLDOWN = 1800
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN غير موجود في Render")
-
-if not CHAT_ID:
-    raise RuntimeError("CHAT_ID غير موجود في Render")
-
+    raise RuntimeError(
+        "BOT_TOKEN موش موجود في Render Environment Variables"
+    )
 
 # =========================================================
-# Render Web Server
+# RENDER WEB SERVER
 # =========================================================
 
 app = Flask(__name__)
 
-
 @app.route("/")
 def home():
-    return "PRO CRYPTO BOT - ONLINE"
+    return "ULTRA PRO MAX BOT ONLINE 🚀"
 
-
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
-
+def run_web():
+    port = int(os.getenv("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port)
 
 # =========================================================
-# حماية Chat ID
+# SECURITY
 # =========================================================
 
-def مسموح(update: Update):
+def allowed(update):
+    chat = update.effective_chat
 
-    if not update.effective_chat:
+    if not chat:
         return False
 
-    return str(update.effective_chat.id) == str(CHAT_ID)
-
+    return str(chat.id) == str(CHAT_ID)
 
 # =========================================================
 # HTTP
 # =========================================================
 
 def get_json(url, params=None):
-
-    response = requests.get(
+    r = requests.get(
         url,
         params=params,
-        timeout=15
+        timeout=20
     )
-
-    response.raise_for_status()
-
-    return response.json()
-
+    r.raise_for_status()
+    return r.json()
 
 # =========================================================
-# سعر العملة
+# BINANCE
 # =========================================================
 
-def get_price(symbol):
+def get_klines(symbol, interval, limit=250):
 
     data = get_json(
-        f"{BINANCE_FUTURES}/fapi/v1/ticker/price",
-        {
-            "symbol": symbol
-        }
-    )
-
-    return float(data["price"])
-
-
-# =========================================================
-# بيانات الشموع
-# =========================================================
-
-def get_klines(
-    symbol,
-    interval="15m",
-    limit=250
-):
-
-    data = get_json(
-        f"{BINANCE_FUTURES}/fapi/v1/klines",
+        f"{BINANCE_URL}/fapi/v1/klines",
         {
             "symbol": symbol,
             "interval": interval,
@@ -138,523 +108,25 @@ def get_klines(
         columns=columns
     )
 
-    for column in [
+    for c in [
         "open",
         "high",
         "low",
         "close",
         "volume"
     ]:
-
-        df[column] = pd.to_numeric(
-            df[column],
+        df[c] = pd.to_numeric(
+            df[c],
             errors="coerce"
         )
 
     return df
 
 
-# =========================================================
-# EMA
-# =========================================================
-
-def ema(series, length):
-
-    return series.ewm(
-        span=length,
-        adjust=False
-    ).mean()
-
-
-# =========================================================
-# RSI
-# =========================================================
-
-def rsi(series, length=14):
-
-    delta = series.diff()
-
-    gain = delta.clip(
-        lower=0
-    )
-
-    loss = -delta.clip(
-        upper=0
-    )
-
-    avg_gain = gain.ewm(
-        alpha=1 / length,
-        adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / length,
-        adjust=False
-    ).mean()
-
-    rs = avg_gain / avg_loss.replace(
-        0,
-        np.nan
-    )
-
-    result = 100 - (
-        100 / (1 + rs)
-    )
-
-    return result.fillna(50)
-
-
-# =========================================================
-# MACD
-# =========================================================
-
-def calculate_macd(series):
-
-    fast = ema(
-        series,
-        12
-    )
-
-    slow = ema(
-        series,
-        26
-    )
-
-    macd_line = fast - slow
-
-    signal = ema(
-        macd_line,
-        9
-    )
-
-    histogram = (
-        macd_line -
-        signal
-    )
-
-    return (
-        macd_line,
-        signal,
-        histogram
-    )
-
-
-# =========================================================
-# ATR
-# =========================================================
-
-def calculate_atr(df, length=14):
-
-    high_low = (
-        df["high"] -
-        df["low"]
-    )
-
-    high_close = (
-        df["high"] -
-        df["close"].shift()
-    ).abs()
-
-    low_close = (
-        df["low"] -
-        df["close"].shift()
-    ).abs()
-
-    true_range = pd.concat(
-        [
-            high_low,
-            high_close,
-            low_close
-        ],
-        axis=1
-    ).max(axis=1)
-
-    return true_range.ewm(
-        alpha=1 / length,
-        adjust=False
-    ).mean()
-
-
-# =========================================================
-# قراءة نموذج الشمعة
-# =========================================================
-
-def candle_pattern(df):
-
-    current = df.iloc[-1]
-    previous = df.iloc[-2]
-
-    body = abs(
-        current["close"] -
-        current["open"]
-    )
-
-    candle_range = (
-        current["high"] -
-        current["low"]
-    )
-
-    upper_wick = (
-        current["high"] -
-        max(
-            current["open"],
-            current["close"]
-        )
-    )
-
-    lower_wick = (
-        min(
-            current["open"],
-            current["close"]
-        ) -
-        current["low"]
-    )
-
-    # Doji
-    if candle_range > 0 and body <= (
-        candle_range * 0.10
-    ):
-
-        return "دوجي (Doji)"
-
-    # Bullish Engulfing
-    if (
-        previous["close"] <
-        previous["open"]
-        and
-        current["close"] >
-        current["open"]
-        and
-        current["open"] <=
-        previous["close"]
-        and
-        current["close"] >=
-        previous["open"]
-    ):
-
-        return "ابتلاع شرائي (Bullish Engulfing)"
-
-    # Bearish Engulfing
-    if (
-        previous["close"] >
-        previous["open"]
-        and
-        current["close"] <
-        current["open"]
-        and
-        current["open"] >=
-        previous["close"]
-        and
-        current["close"] <=
-        previous["open"]
-    ):
-
-        return "ابتلاع بيعي (Bearish Engulfing)"
-
-    # Hammer
-    if (
-        lower_wick > body * 2
-        and
-        upper_wick < body
-    ):
-
-        return "مطرقة (Hammer)"
-
-    # Shooting Star
-    if (
-        upper_wick > body * 2
-        and
-        lower_wick < body
-    ):
-
-        return "نجمة ساقطة (Shooting Star)"
-
-    return "شمعة عادية"
-
-
-# =========================================================
-# الدعم والمقاومة
-# =========================================================
-
-def get_support_resistance(df):
-
-    recent = df.tail(50)
-
-    support = recent["low"].min()
-
-    resistance = recent["high"].max()
-
-    return (
-        float(support),
-        float(resistance)
-    )
-
-
-# =========================================================
-# التحليل الفني
-# =========================================================
-
-def technical_analysis(
-    symbol,
-    interval
-):
-
-    df = get_klines(
-        symbol,
-        interval,
-        250
-    )
-
-    close = df["close"]
-
-    df["ema20"] = ema(
-        close,
-        20
-    )
-
-    df["ema50"] = ema(
-        close,
-        50
-    )
-
-    df["ema200"] = ema(
-        close,
-        200
-    )
-
-    df["rsi"] = rsi(
-        close
-    )
-
-    (
-        df["macd"],
-        df["macd_signal"],
-        df["macd_hist"]
-    ) = calculate_macd(
-        close
-    )
-
-    df["atr"] = calculate_atr(
-        df
-    )
-
-    last = df.iloc[-1]
-
-    score = 0
-
-    reasons = []
-
-    # EMA
-    if (
-        last["ema20"] >
-        last["ema50"] >
-        last["ema200"]
-    ):
-
-        score += 2
-
-        reasons.append(
-            "ترتيب EMA صاعد"
-        )
-
-    elif (
-        last["ema20"] <
-        last["ema50"] <
-        last["ema200"]
-    ):
-
-        score -= 2
-
-        reasons.append(
-            "ترتيب EMA هابط"
-        )
-
-    # RSI
-    if 50 < last["rsi"] < 70:
-
-        score += 1
-
-        reasons.append(
-            "RSI إيجابي"
-        )
-
-    elif 30 < last["rsi"] < 50:
-
-        score -= 1
-
-        reasons.append(
-            "RSI سلبي"
-        )
-
-    elif last["rsi"] >= 70:
-
-        reasons.append(
-            "RSI في منطقة تشبع شرائي"
-        )
-
-    elif last["rsi"] <= 30:
-
-        reasons.append(
-            "RSI في منطقة تشبع بيعي"
-        )
-
-    # MACD
-    if (
-        last["macd"] >
-        last["macd_signal"]
-    ):
-
-        score += 1
-
-        reasons.append(
-            "MACD صاعد"
-        )
-
-    else:
-
-        score -= 1
-
-        reasons.append(
-            "MACD هابط"
-        )
-
-    # Volume
-    average_volume = (
-        df["volume"]
-        .tail(20)
-        .mean()
-    )
-
-    volume_ratio = (
-        last["volume"] /
-        average_volume
-        if average_volume > 0
-        else 1
-    )
-
-    if volume_ratio > 1.3:
-
-        if (
-            last["close"] >
-            last["open"]
-        ):
-
-            score += 1
-
-            reasons.append(
-                "حجم تداول قوي شرائي"
-            )
-
-        else:
-
-            score -= 1
-
-            reasons.append(
-                "حجم تداول قوي بيعي"
-            )
-
-    # Candle
-    pattern = candle_pattern(
-        df
-    )
-
-    if pattern in [
-        "ابتلاع شرائي (Bullish Engulfing)",
-        "مطرقة (Hammer)"
-    ]:
-
-        score += 1
-
-    elif pattern in [
-        "ابتلاع بيعي (Bearish Engulfing)",
-        "نجمة ساقطة (Shooting Star)"
-    ]:
-
-        score -= 1
-
-    support, resistance = (
-        get_support_resistance(df)
-    )
-
-    price = float(
-        last["close"]
-    )
-
-    if score >= 3:
-
-        trend = "صاعد 🟢"
-
-    elif score <= -3:
-
-        trend = "هابط 🔴"
-
-    else:
-
-        trend = "محايد 🟡"
-
-    return {
-        "df": df,
-        "price": price,
-        "score": score,
-        "trend": trend,
-        "rsi": float(last["rsi"]),
-        "macd": float(last["macd"]),
-        "macd_signal": float(
-            last["macd_signal"]
-        ),
-        "atr": float(last["atr"]),
-        "volume_ratio": float(
-            volume_ratio
-        ),
-        "pattern": pattern,
-        "support": support,
-        "resistance": resistance,
-        "reasons": reasons
-    }
-
-
-# =========================================================
-# تحليل متعدد الفريمات
-# =========================================================
-
-def multi_timeframe(symbol):
-
-    results = {}
-
-    for interval in [
-        "5m",
-        "15m",
-        "1h",
-        "4h"
-    ]:
-
-        try:
-
-            results[interval] = (
-                technical_analysis(
-                    symbol,
-                    interval
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                f"MTF ERROR {symbol} {interval}:",
-                repr(e)
-            )
-
-    return results
-
-
-# =========================================================
-# Funding Rate
-# =========================================================
-
 def get_funding(symbol):
 
     data = get_json(
-        f"{BINANCE_FUTURES}/fapi/v1/fundingRate",
+        f"{BINANCE_URL}/fapi/v1/fundingRate",
         {
             "symbol": symbol,
             "limit": 1
@@ -669,14 +141,10 @@ def get_funding(symbol):
     )
 
 
-# =========================================================
-# Open Interest
-# =========================================================
-
 def get_open_interest(symbol):
 
     data = get_json(
-        f"{BINANCE_FUTURES}/fapi/v1/openInterest",
+        f"{BINANCE_URL}/fapi/v1/openInterest",
         {
             "symbol": symbol
         }
@@ -687,16 +155,12 @@ def get_open_interest(symbol):
     )
 
 
-# =========================================================
-# Long / Short
-# =========================================================
-
-def get_long_short_ratio(symbol):
+def get_long_short(symbol):
 
     try:
 
         data = get_json(
-            f"{BINANCE_FUTURES}/futures/data/globalLongShortAccountRatio",
+            f"{BINANCE_URL}/futures/data/globalLongShortAccountRatio",
             {
                 "symbol": symbol,
                 "period": "5m",
@@ -712,69 +176,349 @@ def get_long_short_ratio(symbol):
         )
 
     except Exception:
-
         return 1
 
-
 # =========================================================
-# Fear & Greed
+# INDICATORS
 # =========================================================
 
-def get_fear_greed():
+def ema(series, period):
 
-    data = get_json(
-        FEAR_GREED_API,
-        {
-            "limit": 1
-        }
+    return series.ewm(
+        span=period,
+        adjust=False
+    ).mean()
+
+
+def rsi(series, period=14):
+
+    delta = series.diff()
+
+    gain = delta.clip(
+        lower=0
     )
 
-    item = data["data"][0]
+    loss = -delta.clip(
+        upper=0
+    )
+
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(
+        0,
+        np.nan
+    )
 
     return (
-        int(item["value"]),
-        item["value_classification"]
+        100 -
+        100 / (1 + rs)
+    ).fillna(50)
+
+
+def macd(series):
+
+    fast = ema(series, 12)
+    slow = ema(series, 26)
+
+    line = fast - slow
+    signal = ema(line, 9)
+
+    return line, signal, line - signal
+
+
+def atr(df, period=14):
+
+    hl = (
+        df["high"] -
+        df["low"]
     )
 
+    hc = (
+        df["high"] -
+        df["close"].shift()
+    ).abs()
+
+    lc = (
+        df["low"] -
+        df["close"].shift()
+    ).abs()
+
+    tr = pd.concat(
+        [hl, hc, lc],
+        axis=1
+    ).max(axis=1)
+
+    return tr.ewm(
+        alpha=1 / period,
+        adjust=False
+    ).mean()
 
 # =========================================================
-# Market Data
+# CANDLE
 # =========================================================
 
-def get_global_market():
+def candle_pattern(df):
 
-    data = get_json(
-        f"{COINGECKO_API}/global"
+    c = df.iloc[-1]
+    p = df.iloc[-2]
+
+    body = abs(
+        c["close"] -
+        c["open"]
     )
 
-    return data["data"]
+    rng = (
+        c["high"] -
+        c["low"]
+    )
 
+    if rng <= 0:
+        return "غير واضحة"
+
+    upper = (
+        c["high"] -
+        max(c["open"], c["close"])
+    )
+
+    lower = (
+        min(c["open"], c["close"]) -
+        c["low"]
+    )
+
+    if body <= rng * 0.1:
+        return "Doji"
+
+    if (
+        p["close"] < p["open"]
+        and
+        c["close"] > c["open"]
+        and
+        c["open"] <= p["close"]
+        and
+        c["close"] >= p["open"]
+    ):
+        return "Bullish Engulfing 🟢"
+
+    if (
+        p["close"] > p["open"]
+        and
+        c["close"] < c["open"]
+        and
+        c["open"] >= p["close"]
+        and
+        c["close"] <= p["open"]
+    ):
+        return "Bearish Engulfing 🔴"
+
+    if lower > body * 2 and upper < body:
+        return "Hammer 🟢"
+
+    if upper > body * 2 and lower < body:
+        return "Shooting Star 🔴"
+
+    return (
+        "Bullish Candle 🟢"
+        if c["close"] > c["open"]
+        else
+        "Bearish Candle 🔴"
+    )
 
 # =========================================================
-# Trending Coins
+# TECHNICAL ANALYSIS
 # =========================================================
 
-def get_trending():
+def technical(symbol, interval):
+
+    df = get_klines(
+        symbol,
+        interval
+    )
+
+    close = df["close"]
+
+    df["ema20"] = ema(close, 20)
+    df["ema50"] = ema(close, 50)
+    df["ema200"] = ema(close, 200)
+    df["rsi"] = rsi(close)
+
+    (
+        df["macd"],
+        df["signal"],
+        df["hist"]
+    ) = macd(close)
+
+    df["atr"] = atr(df)
+
+    last = df.iloc[-1]
+
+    score = 0
+    reasons = []
+
+    if (
+        last["ema20"] >
+        last["ema50"] >
+        last["ema200"]
+    ):
+        score += 2
+        reasons.append("EMA صاعد")
+
+    elif (
+        last["ema20"] <
+        last["ema50"] <
+        last["ema200"]
+    ):
+        score -= 2
+        reasons.append("EMA هابط")
+
+    if 50 < last["rsi"] < 70:
+        score += 1
+        reasons.append("RSI إيجابي")
+
+    elif 30 < last["rsi"] < 50:
+        score -= 1
+        reasons.append("RSI سلبي")
+
+    if last["macd"] > last["signal"]:
+        score += 1
+        reasons.append("MACD صاعد")
+    else:
+        score -= 1
+        reasons.append("MACD هابط")
+
+    avg_volume = (
+        df["volume"]
+        .tail(20)
+        .mean()
+    )
+
+    volume_ratio = (
+        last["volume"] / avg_volume
+        if avg_volume
+        else 1
+    )
+
+    if volume_ratio > 1.3:
+
+        if last["close"] > last["open"]:
+            score += 1
+            reasons.append("Volume شرائي قوي")
+        else:
+            score -= 1
+            reasons.append("Volume بيعي قوي")
+
+    recent = df.tail(50)
+
+    support = float(
+        recent["low"].min()
+    )
+
+    resistance = float(
+        recent["high"].max()
+    )
+
+    if score >= 3:
+        trend = "صاعد 🟢"
+    elif score <= -3:
+        trend = "هابط 🔴"
+    else:
+        trend = "محايد 🟡"
+
+    return {
+        "price": float(last["close"]),
+        "rsi": float(last["rsi"]),
+        "macd": float(last["macd"]),
+        "signal": float(last["signal"]),
+        "atr": float(last["atr"]),
+        "volume": float(volume_ratio),
+        "pattern": candle_pattern(df),
+        "support": support,
+        "resistance": resistance,
+        "score": score,
+        "trend": trend,
+        "reasons": reasons
+    }
+
+# =========================================================
+# MULTI TIMEFRAME
+# =========================================================
+
+def multi_timeframe(symbol):
+
+    result = {}
+
+    for tf in [
+        "5m",
+        "15m",
+        "1h",
+        "4h"
+    ]:
+
+        try:
+            result[tf] = technical(
+                symbol,
+                tf
+            )
+        except Exception as e:
+            print(
+                f"MTF ERROR {symbol} {tf}:",
+                repr(e)
+            )
+
+    return result
+
+# =========================================================
+# HYPE
+# =========================================================
+
+def fear_greed():
 
     try:
 
         data = get_json(
-            f"{COINGECKO_API}/search/trending"
+            FEAR_GREED_URL,
+            {"limit": 1}
+        )
+
+        item = data["data"][0]
+
+        return (
+            int(item["value"]),
+            item["value_classification"]
+        )
+
+    except Exception:
+        return 50, "Neutral"
+
+
+def trending():
+
+    try:
+
+        data = get_json(
+            f"{COINGECKO_URL}/search/trending"
         )
 
         result = []
 
-        for coin in data.get(
+        for item in data.get(
             "coins",
             []
         )[:10]:
 
-            item = coin.get(
+            coin = item.get(
                 "item",
                 {}
             )
 
-            symbol = item.get(
+            symbol = coin.get(
                 "symbol"
             )
 
@@ -785,132 +529,196 @@ def get_trending():
 
         return result
 
-    except Exception as e:
-
-        print(
-            "TRENDING ERROR:",
-            repr(e)
-        )
-
+    except Exception:
         return []
 
 
-# =========================================================
-# HYPE ENGINE
-# =========================================================
+def hype():
 
-def calculate_hype(symbol):
-
-    fear_value, fear_name = (
-        get_fear_greed()
-    )
-
-    global_market = (
-        get_global_market()
-    )
-
-    btc_dominance = float(
-        global_market
-        .get(
-            "market_cap_percentage",
-            {}
-        )
-        .get(
-            "btc",
-            0
-        )
-    )
-
-    trending = get_trending()
-
-    short_symbol = symbol.replace(
-        "USDT",
-        ""
-    )
+    fear, name = fear_greed()
+    coins = trending()
 
     score = 50
 
-    # Fear & Greed
-    if fear_value >= 75:
-
+    if fear >= 75:
         score += 15
-
-    elif fear_value >= 60:
-
+    elif fear >= 60:
         score += 8
-
-    elif fear_value <= 25:
-
+    elif fear <= 25:
         score -= 15
-
-    elif fear_value <= 40:
-
+    elif fear <= 40:
         score -= 8
 
-    # Trending
-    if short_symbol in trending:
+    if "BTC" in coins:
+        score += 10
 
-        score += 20
-
-    # Altcoin context
-    if short_symbol != "BTC":
-
-        if btc_dominance < 50:
-
-            score += 5
-
-        elif btc_dominance > 60:
-
-            score -= 5
+    if "SOL" in coins:
+        score += 10
 
     score = max(
         0,
-        min(
-            100,
-            score
-        )
+        min(100, score)
     )
 
     if score >= 80:
-
-        label = "حماس قوي جدًا 🔥🔥"
-
+        label = "🔥🔥 قوي جدًا"
     elif score >= 65:
-
-        label = "حماس قوي 🔥"
-
+        label = "🔥 قوي"
     elif score >= 45:
-
-        label = "محايد 🟡"
-
+        label = "🟡 محايد"
     elif score >= 30:
-
-        label = "حماس ضعيف 🟠"
-
+        label = "🟠 ضعيف"
     else:
-
-        label = "خوف 🔴"
+        label = "🔴 خوف"
 
     return {
         "score": score,
         "label": label,
-        "fear_value": fear_value,
-        "fear_name": fear_name,
-        "btc_dominance": btc_dominance,
-        "trending": trending
+        "fear": fear,
+        "fear_name": name,
+        "trending": coins
     }
 
+# =========================================================
+# WHALES
+# =========================================================
+
+def whales(symbol):
+
+    try:
+
+        data = get_json(
+            f"{BINANCE_URL}/fapi/v1/aggTrades",
+            {
+                "symbol": symbol,
+                "limit": 100
+            }
+        )
+
+        buys = 0
+        sells = 0
+        largest = 0
+
+        threshold = (
+            500000
+            if symbol == "BTCUSDT"
+            else 100000
+        )
+
+        for trade in data:
+
+            value = (
+                float(trade["p"]) *
+                float(trade["q"])
+            )
+
+            if value < threshold:
+                continue
+
+            largest = max(
+                largest,
+                value
+            )
+
+            if trade.get("m"):
+                sells += value
+            else:
+                buys += value
+
+        net = buys - sells
+
+        if net > threshold:
+            direction = "🐋 شراء كبير 🟢"
+        elif net < -threshold:
+            direction = "🐋 بيع كبير 🔴"
+        else:
+            direction = "🐋 محايد 🟡"
+
+        return {
+            "buy": buys,
+            "sell": sells,
+            "largest": largest,
+            "direction": direction
+        }
+
+    except Exception as e:
+
+        print(
+            "WHALES ERROR:",
+            repr(e)
+        )
+
+        return {
+            "buy": 0,
+            "sell": 0,
+            "largest": 0,
+            "direction": "غير متوفر"
+        }
+
+# =========================================================
+# LIQUIDATIONS
+# =========================================================
+
+def liquidations(symbol):
+
+    try:
+
+        data = get_json(
+            f"{BINANCE_URL}/fapi/v1/allForceOrders",
+            {
+                "symbol": symbol,
+                "limit": 100
+            }
+        )
+
+        long_liq = 0
+        short_liq = 0
+
+        for order in data:
+
+            value = (
+                float(order["price"]) *
+                float(order["origQty"])
+            )
+
+            if order["side"] == "SELL":
+                long_liq += value
+            else:
+                short_liq += value
+
+        if short_liq > long_liq * 1.5:
+            direction = "💥 Short Liquidations قوية 🟢"
+        elif long_liq > short_liq * 1.5:
+            direction = "💥 Long Liquidations قوية 🔴"
+        else:
+            direction = "💥 متوازنة 🟡"
+
+        return {
+            "long": long_liq,
+            "short": short_liq,
+            "direction": direction
+        }
+
+    except Exception as e:
+
+        print(
+            "LIQ ERROR:",
+            repr(e)
+        )
+
+        return {
+            "long": 0,
+            "short": 0,
+            "direction": "غير متوفر"
+        }
 
 # =========================================================
 # SIGNAL ENGINE
 # =========================================================
 
-def build_signal(
-    symbol,
-    interval
-):
+def signal(symbol, interval):
 
-    tech = technical_analysis(
+    tech = technical(
         symbol,
         interval
     )
@@ -919,170 +727,68 @@ def build_signal(
         symbol
     )
 
-    funding = get_funding(
-        symbol
-    )
-
-    open_interest = (
-        get_open_interest(
-            symbol
-        )
-    )
-
-    long_short = (
-        get_long_short_ratio(
-            symbol
-        )
-    )
-
-    hype = calculate_hype(
-        symbol
-    )
+    funding = get_funding(symbol)
+    oi = get_open_interest(symbol)
+    ls = get_long_short(symbol)
+    hp = hype()
+    wh = whales(symbol)
 
     score = tech["score"]
 
-    # 1H confirmation
-    if "1h" in mtf:
+    for tf, weight in [
+        ("1h", 2),
+        ("4h", 2)
+    ]:
 
-        if (
-            mtf["1h"]["trend"] ==
-            "صاعد 🟢"
-        ):
+        if tf in mtf:
 
-            score += 2
+            if mtf[tf]["trend"] == "صاعد 🟢":
+                score += weight
 
-        elif (
-            mtf["1h"]["trend"] ==
-            "هابط 🔴"
-        ):
+            elif mtf[tf]["trend"] == "هابط 🔴":
+                score -= weight
 
-            score -= 2
-
-    # 4H confirmation
-    if "4h" in mtf:
-
-        if (
-            mtf["4h"]["trend"] ==
-            "صاعد 🟢"
-        ):
-
-            score += 2
-
-        elif (
-            mtf["4h"]["trend"] ==
-            "هابط 🔴"
-        ):
-
-            score -= 2
-
-    # Funding
     if funding > 0.0005:
-
         score -= 1
 
     elif funding < -0.0005:
-
         score += 1
 
-    # Hype
-    if hype["score"] >= 75:
+    if wh["direction"] == "🐋 شراء كبير 🟢":
+        score += 1
 
-        if score > 0:
+    elif wh["direction"] == "🐋 بيع كبير 🔴":
+        score -= 1
 
-            score += 1
-
-    elif hype["score"] <= 25:
-
-        if score < 0:
-
-            score -= 1
-
-    # القرار
-    if score >= 5:
-
+    if score >= 6:
         direction = "LONG 🟢"
-
-    elif score <= -5:
-
+    elif score <= -6:
         direction = "SHORT 🔴"
-
     else:
-
         direction = "WAIT 🟡"
 
     price = tech["price"]
-
     atr_value = tech["atr"]
 
-    # Entry / SL / TP
+    entry = price
+    stop = None
+    tp1 = None
+    tp2 = None
+    tp3 = None
+
     if direction.startswith("LONG"):
 
-        entry = price
-
-        stop = (
-            price -
-            atr_value * 1.5
-        )
-
-        tp1 = (
-            price +
-            atr_value * 1.5
-        )
-
-        tp2 = (
-            price +
-            atr_value * 2.5
-        )
-
-        tp3 = (
-            price +
-            atr_value * 4
-        )
+        stop = price - atr_value * 1.5
+        tp1 = price + atr_value * 1.5
+        tp2 = price + atr_value * 2.5
+        tp3 = price + atr_value * 4
 
     elif direction.startswith("SHORT"):
 
-        entry = price
-
-        stop = (
-            price +
-            atr_value * 1.5
-        )
-
-        tp1 = (
-            price -
-            atr_value * 1.5
-        )
-
-        tp2 = (
-            price -
-            atr_value * 2.5
-        )
-
-        tp3 = (
-            price -
-            atr_value * 4
-        )
-
-    else:
-
-        entry = price
-        stop = None
-        tp1 = None
-        tp2 = None
-        tp3 = None
-
-    # Risk
-    if abs(score) >= 8:
-
-        risk = "منخفض - متوسط"
-
-    elif abs(score) >= 5:
-
-        risk = "متوسط"
-
-    else:
-
-        risk = "مرتفع / انتظار"
+        stop = price + atr_value * 1.5
+        tp1 = price - atr_value * 1.5
+        tp2 = price - atr_value * 2.5
+        tp3 = price - atr_value * 4
 
     return {
         "symbol": symbol,
@@ -1090,436 +796,698 @@ def build_signal(
         "tech": tech,
         "mtf": mtf,
         "funding": funding,
-        "open_interest": open_interest,
-        "long_short": long_short,
-        "hype": hype,
+        "oi": oi,
+        "long_short": ls,
+        "hype": hp,
+        "whales": wh,
         "score": score,
         "direction": direction,
         "entry": entry,
         "stop": stop,
         "tp1": tp1,
         "tp2": tp2,
-        "tp3": tp3,
-        "risk": risk
+        "tp3": tp3
     }
 
-
 # =========================================================
-# تنسيق النتيجة
+# FORMAT
 # =========================================================
 
 def format_signal(data):
 
-    tech = data["tech"]
-    hype = data["hype"]
+    t = data["tech"]
+    h = data["hype"]
+    w = data["whales"]
 
     text = (
-        f"🚀 تحليل {data['symbol']} — Futures\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
+        "🚀 ULTRA PRO MAX\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"🎯 الإشارة: {data['direction']}\n"
-        f"📊 قوة الإشارة: {data['score']}\n"
-        f"⚠️ المخاطرة: {data['risk']}\n\n"
+        f"📊 {data['symbol']} FUTURES\n"
+        f"⏱️ {data['interval']}\n\n"
 
-        f"💰 السعر الحالي:\n"
-        f"{tech['price']:.6f}\n\n"
+        f"🎯 SIGNAL: {data['direction']}\n"
+        f"🔥 SCORE: {data['score']}\n\n"
 
-        f"📈 الاتجاه:\n"
+        f"💰 PRICE: {t['price']:.6f}\n\n"
+
+        "📈 MULTI TIMEFRAME\n"
         f"5m: {data['mtf'].get('5m', {}).get('trend', '?')}\n"
         f"15m: {data['mtf'].get('15m', {}).get('trend', '?')}\n"
-        f"1h: {data['mtf'].get('1h', {}).get('trend', '?')}\n"
-        f"4h: {data['mtf'].get('4h', {}).get('trend', '?')}\n\n"
+        f"1H: {data['mtf'].get('1h', {}).get('trend', '?')}\n"
+        f"4H: {data['mtf'].get('4h', {}).get('trend', '?')}\n\n"
 
-        f"📊 المؤشرات:\n"
-        f"RSI: {tech['rsi']:.2f}\n"
+        "📊 INDICATORS\n"
+        f"RSI: {t['rsi']:.2f}\n"
         f"MACD: "
-        f"{'صاعد 🟢' if tech['macd'] > tech['macd_signal'] else 'هابط 🔴'}\n"
-        f"Volume: {tech['volume_ratio']:.2f}x\n\n"
+        f"{'Bullish 🟢' if t['macd'] > t['signal'] else 'Bearish 🔴'}\n"
+        f"Volume: {t['volume']:.2f}x\n"
+        f"Candle: {t['pattern']}\n\n"
 
-        f"🕯️ نموذج الشموع:\n"
-        f"{tech['pattern']}\n\n"
+        f"🟢 Support: {t['support']:.6f}\n"
+        f"🔴 Resistance: {t['resistance']:.6f}\n\n"
 
-        f"🟢 الدعم:\n"
-        f"{tech['support']:.6f}\n\n"
+        "🔥 HYPE\n"
+        f"Score: {h['score']}/100\n"
+        f"{h['label']}\n"
+        f"Fear & Greed: {h['fear']}/100\n\n"
 
-        f"🔴 المقاومة:\n"
-        f"{tech['resistance']:.6f}\n\n"
+        "🐋 WHALES\n"
+        f"{w['direction']}\n"
+        f"Buy: ${w['buy']:,.0f}\n"
+        f"Sell: ${w['sell']:,.0f}\n"
+        f"Largest: ${w['largest']:,.0f}\n\n"
 
-        f"🔥 Crypto Hype:\n"
-        f"{hype['score']}/100 — {hype['label']}\n"
-        f"Fear & Greed: "
-        f"{hype['fear_value']} "
-        f"({hype['fear_name']})\n"
-        f"BTC Dominance: "
-        f"{hype['btc_dominance']:.2f}%\n\n"
-
-        f"⚡ Futures:\n"
-        f"Funding: "
-        f"{data['funding'] * 100:.4f}%\n"
-        f"Open Interest: "
-        f"{data['open_interest']:.2f}\n"
-        f"Long/Short: "
-        f"{data['long_short']:.2f}\n\n"
+        "⚡ FUTURES\n"
+        f"Funding: {data['funding'] * 100:.4f}%\n"
+        f"Long/Short: {data['long_short']:.2f}\n"
+        f"Open Interest: {data['oi']:.2f}\n\n"
     )
 
-    if not data["direction"].startswith("WAIT"):
+    if data["stop"]:
 
         text += (
-            f"🎯 نقطة الدخول:\n"
-            f"{data['entry']:.6f}\n\n"
-
-            f"🛑 Stop Loss:\n"
-            f"{data['stop']:.6f}\n\n"
-
-            f"💰 TP1:\n"
-            f"{data['tp1']:.6f}\n\n"
-
-            f"💰 TP2:\n"
-            f"{data['tp2']:.6f}\n\n"
-
-            f"💰 TP3:\n"
-            f"{data['tp3']:.6f}\n\n"
+            "🎯 TRADE PLAN\n"
+            f"Entry: {data['entry']:.6f}\n"
+            f"SL: {data['stop']:.6f}\n"
+            f"TP1: {data['tp1']:.6f}\n"
+            f"TP2: {data['tp2']:.6f}\n"
+            f"TP3: {data['tp3']:.6f}\n\n"
         )
 
     else:
 
         text += (
-            "⏳ لا توجد صفقة واضحة حاليًا.\n"
-            "الأفضل انتظار تأكيد أقوى.\n\n"
+            "⏳ WAIT\n"
+            "Confirmation موش كافية للدخول.\n\n"
         )
 
     text += (
-        "━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ التحليل مبني على بيانات السوق "
-        "والمؤشرات، وليس ضمانًا للربح."
+        "⚠️ تحليل آلي وليس ضمان ربح.\n"
+        "استعمل Risk Management."
     )
 
     return text
 
+# =========================================================
+# MENU
+# =========================================================
+
+def main_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "₿ BTC",
+                callback_data="btc_menu"
+            ),
+            InlineKeyboardButton(
+                "◎ SOL",
+                callback_data="sol_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 Market",
+                callback_data="market"
+            ),
+            InlineKeyboardButton(
+                "🔥 Hype",
+                callback_data="hype"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🐋 Whales",
+                callback_data="whales"
+            ),
+            InlineKeyboardButton(
+                "💥 Liquidations",
+                callback_data="liquidations"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⚡ Futures",
+                callback_data="futures"
+            ),
+            InlineKeyboardButton(
+                "🚨 Alerts",
+                callback_data="alerts"
+            )
+        ]
+    ])
+
+
+def timeframe_keyboard(prefix):
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "5m",
+                callback_data=f"{prefix}_5m"
+            ),
+            InlineKeyboardButton(
+                "15m",
+                callback_data=f"{prefix}_15m"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "1H",
+                callback_data=f"{prefix}_1h"
+            ),
+            InlineKeyboardButton(
+                "4H",
+                callback_data=f"{prefix}_4h"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Menu",
+                callback_data="home"
+            )
+        ]
+    ])
 
 # =========================================================
-# /start
+# START
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update, context):
 
-    if not مسموح(update):
+    if not allowed(update):
         return
 
     await update.message.reply_text(
-        "🤖 PRO CRYPTO BOT ONLINE 🔥\n\n"
-        "الأوامر المتاحة:\n\n"
-        "/btc — تحليل Bitcoin\n"
-        "/sol — تحليل Solana\n"
-        "/market — حالة السوق\n"
-        "/hype — Crypto Hype\n"
-        "/analyze BTCUSDT 15m\n"
-        "/analyze SOLUSDT 1h"
+        "🚀 ULTRA PRO MAX\n\n"
+        "اختار شنوّة تحب تشوف:",
+        reply_markup=main_keyboard()
     )
 
-
 # =========================================================
-# /btc
+# BUTTONS
 # =========================================================
 
-async def btc(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def buttons(update, context):
 
-    if not مسموح(update):
+    query = update.callback_query
+
+    if str(query.message.chat.id) != str(CHAT_ID):
+        await query.answer()
         return
 
-    msg = await update.message.reply_text(
-        "⏳ جاري تحليل Bitcoin..."
-    )
+    await query.answer()
 
-    try:
+    data = query.data
 
-        result = build_signal(
-            "BTCUSDT",
-            "15m"
-        )
+    if data == "home":
 
-        await msg.edit_text(
-            format_signal(result)
-        )
-
-    except Exception as e:
-
-        print(
-            "BTC ERROR:",
-            repr(e)
-        )
-
-        await msg.edit_text(
-            "❌ صار خطأ في تحليل BTC.\n"
-            "شوف Render Logs."
-        )
-
-
-# =========================================================
-# /sol
-# =========================================================
-
-async def sol(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not مسموح(update):
-        return
-
-    msg = await update.message.reply_text(
-        "⏳ جاري تحليل Solana..."
-    )
-
-    try:
-
-        result = build_signal(
-            "SOLUSDT",
-            "15m"
-        )
-
-        await msg.edit_text(
-            format_signal(result)
-        )
-
-    except Exception as e:
-
-        print(
-            "SOL ERROR:",
-            repr(e)
-        )
-
-        await msg.edit_text(
-            "❌ صار خطأ في تحليل SOL.\n"
-            "شوف Render Logs."
-        )
-
-
-# =========================================================
-# /analyze
-# =========================================================
-
-async def analyze(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not مسموح(update):
-        return
-
-    args = context.args
-
-    if not args:
-
-        await update.message.reply_text(
-            "مثال:\n\n"
-            "/analyze BTCUSDT 15m\n"
-            "/analyze SOLUSDT 1h"
+        await query.edit_message_text(
+            "🚀 ULTRA PRO MAX\n\n"
+            "اختار شنوّة تحب تشوف:",
+            reply_markup=main_keyboard()
         )
 
         return
 
-    symbol = args[0].upper()
+    if data == "btc_menu":
 
-    interval = (
-        args[1]
-        if len(args) > 1
-        else "15m"
-    )
-
-    valid_intervals = [
-        "5m",
-        "15m",
-        "1h",
-        "4h"
-    ]
-
-    if interval not in valid_intervals:
-
-        await update.message.reply_text(
-            "الفريمات المتاحة:\n"
-            "5m / 15m / 1h / 4h"
+        await query.edit_message_text(
+            "₿ BTC ANALYSIS\n\n"
+            "اختار الـTimeframe:",
+            reply_markup=timeframe_keyboard("btc")
         )
 
         return
 
-    msg = await update.message.reply_text(
-        f"⏳ جاري تحليل {symbol} على {interval}..."
-    )
+    if data == "sol_menu":
 
-    try:
-
-        result = build_signal(
-            symbol,
-            interval
+        await query.edit_message_text(
+            "◎ SOL ANALYSIS\n\n"
+            "اختار الـTimeframe:",
+            reply_markup=timeframe_keyboard("sol")
         )
 
-        await msg.edit_text(
-            format_signal(result)
-        )
-
-    except Exception as e:
-
-        print(
-            "ANALYZE ERROR:",
-            repr(e)
-        )
-
-        await msg.edit_text(
-            "❌ ما نجمتش نحلل العملة.\n"
-            "تأكد من اسمها على Binance Futures."
-        )
-
-
-# =========================================================
-# /hype
-# =========================================================
-
-async def hype(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not مسموح(update):
         return
 
-    try:
+    if data.startswith("btc_") or data.startswith("sol_"):
 
-        btc_hype = calculate_hype(
+        coin, tf = data.split("_")
+
+        symbol = (
             "BTCUSDT"
+            if coin == "btc"
+            else "SOLUSDT"
         )
 
-        sol_hype = calculate_hype(
-            "SOLUSDT"
+        await query.edit_message_text(
+            f"⏳ جاري تحليل {symbol} {tf}..."
         )
 
-        trending = ", ".join(
-            btc_hype["trending"][:10]
-        )
+        try:
 
-        text = (
-            "🔥 CRYPTO HYPE DASHBOARD\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
+            result = signal(
+                symbol,
+                tf
+            )
 
-            f"🌍 Fear & Greed:\n"
-            f"{btc_hype['fear_value']} "
-            f"— {btc_hype['fear_name']}\n\n"
+            await query.edit_message_text(
+                format_signal(result),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data=data
+                        ),
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
 
-            f"₿ Bitcoin Hype:\n"
-            f"{btc_hype['score']}/100 "
-            f"— {btc_hype['label']}\n\n"
+        except Exception as e:
 
-            f"◎ Solana Hype:\n"
-            f"{sol_hype['score']}/100 "
-            f"— {sol_hype['label']}\n\n"
+            print(
+                "ANALYSIS ERROR:",
+                repr(e)
+            )
 
-            f"₿ BTC Dominance:\n"
-            f"{btc_hype['btc_dominance']:.2f}%\n\n"
+            await query.edit_message_text(
+                "❌ صار خطأ في جلب البيانات.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
 
-            f"🔥 Trending:\n"
-            f"{trending or 'لا توجد بيانات'}\n\n"
-
-            "━━━━━━━━━━━━━━━━━━\n"
-            "الـHype عامل مساعد للتحليل "
-            "وليس إشارة دخول وحده."
-        )
-
-        await update.message.reply_text(
-            text
-        )
-
-    except Exception as e:
-
-        print(
-            "HYPE ERROR:",
-            repr(e)
-        )
-
-        await update.message.reply_text(
-            "❌ تعذر جلب بيانات الـHype."
-        )
-
-
-# =========================================================
-# /market
-# =========================================================
-
-async def market(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not مسموح(update):
         return
 
-    msg = await update.message.reply_text(
-        "⏳ جاري تحليل السوق..."
+    if data == "hype":
+
+        try:
+
+            h = hype()
+
+            await query.edit_message_text(
+                "🔥 CRYPTO HYPE\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔥 Score: {h['score']}/100\n"
+                f"{h['label']}\n\n"
+                f"🌡 Fear & Greed: "
+                f"{h['fear']}/100\n"
+                f"{h['fear_name']}\n\n"
+                "📈 Trending:\n"
+                f"{', '.join(h['trending']) or 'No data'}",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data="hype"
+                        ),
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        except Exception as e:
+
+            print(
+                "HYPE ERROR:",
+                repr(e)
+            )
+
+            await query.edit_message_text(
+                "❌ Hype API error.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        return
+
+    if data == "market":
+
+        await query.edit_message_text(
+            "⏳ جاري فحص السوق..."
+        )
+
+        try:
+
+            btc = signal(
+                "BTCUSDT",
+                "15m"
+            )
+
+            sol = signal(
+                "SOLUSDT",
+                "15m"
+            )
+
+            await query.edit_message_text(
+                "🌍 MARKET DASHBOARD\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+
+                f"₿ BTC\n"
+                f"{btc['direction']}\n"
+                f"Score: {btc['score']}\n"
+                f"Price: {btc['tech']['price']:.2f}\n\n"
+
+                f"◎ SOL\n"
+                f"{sol['direction']}\n"
+                f"Score: {sol['score']}\n"
+                f"Price: {sol['tech']['price']:.4f}\n\n"
+
+                f"🔥 Hype: "
+                f"{btc['hype']['score']}/100\n"
+                f"🌡 Fear & Greed: "
+                f"{btc['hype']['fear']}/100",
+
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data="market"
+                        ),
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        except Exception as e:
+
+            print(
+                "MARKET ERROR:",
+                repr(e)
+            )
+
+            await query.edit_message_text(
+                "❌ Market data error.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        return
+
+    if data == "whales":
+
+        await query.edit_message_text(
+            "⏳ جاري فحص Whale Activity..."
+        )
+
+        try:
+
+            btc = whales("BTCUSDT")
+            sol = whales("SOLUSDT")
+
+            await query.edit_message_text(
+                "🐋 WHALE ACTIVITY\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+
+                "₿ BTC\n"
+                f"{btc['direction']}\n"
+                f"Buy: ${btc['buy']:,.0f}\n"
+                f"Sell: ${btc['sell']:,.0f}\n\n"
+
+                "◎ SOL\n"
+                f"{sol['direction']}\n"
+                f"Buy: ${sol['buy']:,.0f}\n"
+                f"Sell: ${sol['sell']:,.0f}",
+
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data="whales"
+                        ),
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        except Exception as e:
+
+            print(
+                "WHALE BUTTON ERROR:",
+                repr(e)
+            )
+
+            await query.edit_message_text(
+                "❌ Whale data error."
+            )
+
+        return
+
+    if data == "liquidations":
+
+        await query.edit_message_text(
+            "⏳ جاري فحص Liquidations..."
+        )
+
+        try:
+
+            btc = liquidations(
+                "BTCUSDT"
+            )
+
+            sol = liquidations(
+                "SOLUSDT"
+            )
+
+            await query.edit_message_text(
+                "💥 LIQUIDATIONS\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+
+                "₿ BTC\n"
+                f"{btc['direction']}\n"
+                f"Long Liq: ${btc['long']:,.0f}\n"
+                f"Short Liq: ${btc['short']:,.0f}\n\n"
+
+                "◎ SOL\n"
+                f"{sol['direction']}\n"
+                f"Long Liq: ${sol['long']:,.0f}\n"
+                f"Short Liq: ${sol['short']:,.0f}",
+
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data="liquidations"
+                        ),
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        except Exception as e:
+
+            print(
+                "LIQ BUTTON ERROR:",
+                repr(e)
+            )
+
+            await query.edit_message_text(
+                "❌ Liquidation data error."
+            )
+
+        return
+
+    if data == "futures":
+
+        await query.edit_message_text(
+            "⏳ جاري جلب Futures Data..."
+        )
+
+        try:
+
+            btc_f = get_funding(
+                "BTCUSDT"
+            )
+
+            sol_f = get_funding(
+                "SOLUSDT"
+            )
+
+            btc_ls = get_long_short(
+                "BTCUSDT"
+            )
+
+            sol_ls = get_long_short(
+                "SOLUSDT"
+            )
+
+            await query.edit_message_text(
+                "⚡ FUTURES DATA\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+
+                "₿ BTC\n"
+                f"Funding: {btc_f * 100:.4f}%\n"
+                f"Long/Short: {btc_ls:.2f}\n\n"
+
+                "◎ SOL\n"
+                f"Funding: {sol_f * 100:.4f}%\n"
+                f"Long/Short: {sol_ls:.2f}",
+
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh",
+                            callback_data="futures"
+                        ),
+                        InlineKeyboardButton(
+                            "🔙 Menu",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+
+        except Exception as e:
+
+            print(
+                "FUTURES ERROR:",
+                repr(e)
+            )
+
+            await query.edit_message_text(
+                "❌ Futures API error."
+            )
+
+        return
+
+    if data == "alerts":
+
+        await query.edit_message_text(
+            "🚨 ALERT SYSTEM\n\n"
+            "Alerts تعمل تلقائيًا على:\n"
+            "₿ BTCUSDT\n"
+            "◎ SOLUSDT\n\n"
+            "الفحص كل 5 دقائق.\n"
+            "التنبيه فقط وقت signal قوي.",
+
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Menu",
+                        callback_data="home"
+                    )
+                ]
+            ])
+        )
+
+# =========================================================
+# AUTOMATIC ALERTS
+# =========================================================
+
+async def alert_loop(application):
+
+    last_alert = {}
+
+    while True:
+
+        try:
+
+            for symbol in [
+                "BTCUSDT",
+                "SOLUSDT"
+            ]:
+
+                result = signal(
+                    symbol,
+                    "15m"
+                )
+
+                direction = result["direction"]
+                score = result["score"]
+
+                if (
+                    direction in [
+                        "LONG 🟢",
+                        "SHORT 🔴"
+                    ]
+                    and
+                    abs(score) >= 7
+                ):
+
+                    key = (
+                        symbol,
+                        direction
+                    )
+
+                    now = time.time()
+
+                    if (
+                        key not in last_alert
+                        or
+                        now -
+                        last_alert[key]
+                        >=
+                        ALERT_COOLDOWN
+                    ):
+
+                        await application.bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=(
+                                "🚨 ULTRA PRO ALERT 🚨\n\n"
+                                +
+                                format_signal(
+                                    result
+                                )
+                            )
+                        )
+
+                        last_alert[key] = now
+
+        except Exception as e:
+
+            print(
+                "ALERT ERROR:",
+                repr(e)
+            )
+
+        await asyncio.sleep(
+            ALERT_INTERVAL
+        )
+
+# =========================================================
+# STARTUP
+# =========================================================
+
+async def post_init(application):
+
+    asyncio.create_task(
+        alert_loop(application)
     )
 
-    try:
-
-        btc_result = build_signal(
-            "BTCUSDT",
-            "15m"
-        )
-
-        sol_result = build_signal(
-            "SOLUSDT",
-            "15m"
-        )
-
-        text = (
-            "🌍 PRO CRYPTO MARKET\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-
-            f"₿ BTC:\n"
-            f"{btc_result['direction']}\n"
-            f"Score: {btc_result['score']}\n"
-            f"Hype: "
-            f"{btc_result['hype']['score']}/100\n\n"
-
-            f"◎ SOL:\n"
-            f"{sol_result['direction']}\n"
-            f"Score: {sol_result['score']}\n"
-            f"Hype: "
-            f"{sol_result['hype']['score']}/100\n\n"
-
-            f"🌡 Fear & Greed:\n"
-            f"{btc_result['hype']['fear_value']} "
-            f"— {btc_result['hype']['fear_name']}\n\n"
-
-            f"₿ BTC Dominance:\n"
-            f"{btc_result['hype']['btc_dominance']:.2f}%\n\n"
-
-            "━━━━━━━━━━━━━━━━━━\n"
-            "استعمل /btc أو /sol للتحليل الكامل."
-        )
-
-        await msg.edit_text(
-            text
-        )
-
-    except Exception as e:
-
-        print(
-            "MARKET ERROR:",
-            repr(e)
-        )
-
-        await msg.edit_text(
-            "❌ تعذر جلب بيانات السوق."
-        )
-
-
-# =========================================================
-# Error Handler
-# =========================================================
 
 async def error_handler(
     update,
@@ -1532,27 +1500,17 @@ async def error_handler(
     )
 
 
-# =========================================================
-# MAIN
-# =========================================================
-
 def main():
 
-    server_thread = threading.Thread(
-        target=run_server,
+    threading.Thread(
+        target=run_web,
         daemon=True
-    )
-
-    server_thread.start()
-
-    print(
-        "🚀 Starting PRO Crypto Bot..."
-    )
+    ).start()
 
     application = (
-        Application
-        .builder()
+        Application.builder()
         .token(BOT_TOKEN)
+        .post_init(post_init)
         .build()
     )
 
@@ -1564,37 +1522,8 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler(
-            "btc",
-            btc
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "sol",
-            sol
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "analyze",
-            analyze
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "hype",
-            hype
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "market",
-            market
+        CallbackQueryHandler(
+            buttons
         )
     )
 
@@ -1603,7 +1532,7 @@ def main():
     )
 
     print(
-        "🔥 PRO BOT IS RUNNING..."
+        "🚀 ULTRA PRO MAX BOT STARTED"
     )
 
     application.run_polling(
