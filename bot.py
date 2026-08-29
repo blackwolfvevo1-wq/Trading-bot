@@ -19,7 +19,7 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU")
 CHAT_ID = os.getenv("CHAT_ID", "6937661753")
 
 BINANCE_URL = "https://fapi.binance.com"
