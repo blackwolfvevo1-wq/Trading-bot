@@ -1,12 +1,12 @@
 import os
 import threading
-import io
+import requests
 from flask import Flask
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# سرفر Flask لمنصة Render
+# سرفر Flask للـ Render
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -30,46 +30,46 @@ system_prompt = """
 أعطِ رأياً واضحاً حول ما إذا كان الاتجاه يميل إلى Long أو Short بناءً على السيولة وحركة السعر، مع التذكير دائماً بإدارة المخاطر.
 """
 
-# استدعاء الموديل بطريقة آمنة ومتوافقة
 model = genai.GenerativeModel(
     model_name="gemini-1.5-flash",
     system_instruction=system_prompt
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("مرحباً بك يا ياسين! البوت يخدم الآن بـ Pro Mode. ابعثلي اسم العملة أو تصويرة شارت باش نحللهالك بدقة.")
+    await update.message.reply_text("مرحباً بك يا ياسين! البوت جاهز. ابعثلي اسم العملة أو تصويرة شارت باش نحللهالك بدقة.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
-    processing_msg = await update.message.reply_text("⏳ جاري قراءة معطيات السوق...")
+    processing_msg = await update.message.reply_text("⏳ جاري تحليل السوق...")
     try:
         response = model.generate_content(user_message)
         await processing_msg.edit_text(response.text)
     except Exception as e:
-        print(f"Error in text: {e}")
-        await processing_msg.edit_text("صار خطأ في الاتصال بالذكاء الاصطناعي، عاود جرب.")
+        print(f"Error: {e}")
+        await processing_msg.edit_text("صار خطأ في الاتصال، عاود جرب.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    processing_msg = await update.message.reply_text("👁️ جاري تحليل الشموع ومؤشرات الـ RSI والـ MACD من التصويرة...")
+    processing_msg = await update.message.reply_text("👁️ جاري قراءة الشموع ومؤشرات الـ RSI والـ MACD...")
     try:
-        # تحميل الصورة بطريقة صحيحة وآمنة للـ API
+        # جلب رابط الصورة مباشرة من التيليجرام وتحميلها كـ bytes
         photo_file = await update.message.photo[-1].get_file()
-        photo_bytes = io.BytesIO()
-        await photo_file.download(out=photo_bytes)
-        photo_bytes.seek(0)
+        photo_url = photo_file.file_path
         
+        image_response = requests.get(photo_url)
+        image_bytes = image_response.content
+
         image_part = {
             "mime_type": "image/jpeg",
-            "data": photo_bytes.read()
+            "data": image_bytes
         }
         
-        prompt = "حلل هذا المخطط البياني للعقود الآجلة بالتفصيل: اذكر اتجاه الشموع، وضعية مؤشر RSI و MACD، وأعطني توصية واضحة (Long أو Short) مع نقاط الدخول وإدارة المخاطر."
+        prompt = "حلل هذا المخطط البياني للعقود الآجلة بالتفصيل: اتجاه الشموع، مؤشر RSI و MACD، وعطيني توصية (Long أو Short) مع نقاط الدخول وإدارة المخاطر."
         
         response = model.generate_content([prompt, image_part])
         await processing_msg.edit_text(response.text)
     except Exception as e:
-        print(f"Error in photo: {e}")
-        await processing_msg.edit_text("ما نجمتش نقرا التصويرة بوضوح، تأكد من جودتها وعاود ابعثها.")
+        print(f"Photo Error: {e}")
+        await processing_msg.edit_text("ما نجمتش نعالج التصويرة، عاود ابعثها من جديد.")
 
 def main():
     t = threading.Thread(target=run_flask)
