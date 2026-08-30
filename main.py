@@ -6,9 +6,8 @@ import requests
 import pandas as pd
 import yfinance as yf
 import matplotlib
-matplotlib.use('Agg') # ضرورية باش السيرفر ما يتبلوكاش وقت يرسم الشارت
+matplotlib.use('Agg')
 import mplfinance as mpf
-from dotenv import load_dotenv
 from cachetools import TTLCache
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,12 +19,13 @@ from telegram.ext import (
 )
 
 # =========================================================
-# 1. إعدادات الحماية والتسجيل
+# 1. إعدادات البوت (تم إرجاع التوكن والآيدي مباشرة)
 # =========================================================
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
+CHAT_ID = "6937661753"
+
+# Render يعطي البورت أوتوماتيكياً، كان ما فماش نحطو 8080
 PORT = int(os.getenv("PORT", "8080"))
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
@@ -88,20 +88,13 @@ def calculate_macd(series):
     return macd_line.iloc[-1], signal_line.iloc[-1]
 
 def generate_chart(df_hist, symbol, timeframe):
-    """دالة رسم الشارت (الرسم البياني) للشموع اليابانية"""
-    df_plot = df_hist.tail(40) # ناخذو آخر 40 شمعة باش الشارت يكون واضح
+    df_plot = df_hist.tail(40)
     buf = io.BytesIO()
-    
-    # ستايل الشارت
     mc = mpf.make_marketcolors(up='green', down='red', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
-    
-    mpf.plot(df_plot, type='candle', style=s, 
-             title=f"\n{symbol} ({timeframe})", 
-             figsize=(8, 5), savefig=buf)
-    
+    mpf.plot(df_plot, type='candle', style=s, title=f"\n{symbol} ({timeframe})", figsize=(8, 5), savefig=buf)
     buf.seek(0)
-    return buf.getvalue() # نرجعو الصورة كـ Bytes
+    return buf.getvalue()
 
 def analyze_candlesticks(df):
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -141,7 +134,6 @@ def fetch_yf_sync(symbol, timeframe):
         change = ((price - open_price) / open_price) * 100
         trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
         
-        # حساب الدعم والمقاومة (Pivot Points) بناءً على الشمعة السابقة
         last_h, last_l, last_c = df['high'].iloc[-2], df['low'].iloc[-2], df['close'].iloc[-2]
         pivot = (last_h + last_l + last_c) / 3
         r1, s1 = (2 * pivot) - last_l, (2 * pivot) - last_h
@@ -241,7 +233,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "home":
-        # لو كانت الرسالة السابقة فيها صورة، نمسحوها ونبعثو رسالة نصية جديدة
         await query.message.delete()
         await context.bot.send_message(
             chat_id=CHAT_ID, text="🚀 **القائمة الرئيسية:**", 
@@ -274,15 +265,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("sig_"):
         _, sym, tf = data.split("_")
-        
-        # رسالة انتظار
         loading_msg = await context.bot.send_message(chat_id=CHAT_ID, text=f"⏳ جاري التحليل ورسم الشارت لـ {sym} على فريم {tf}...")
         
         stats, chart_bytes = await get_market_data(sym, tf)
         
-        await loading_msg.delete() # فسخ رسالة الانتظار
+        await loading_msg.delete()
         try:
-            await query.message.delete() # فسخ القائمة القديمة
+            await query.message.delete()
         except:
             pass
 
@@ -295,7 +284,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = await create_signal_message(stats)
         
-        # إرسال الشارت (الصورة) مع النص
         await context.bot.send_photo(
             chat_id=CHAT_ID,
             photo=chart_bytes,
