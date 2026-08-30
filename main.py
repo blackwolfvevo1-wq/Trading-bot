@@ -65,7 +65,44 @@ async def start_web_server(application: Application):
     await site.start()
 
 # =========================================================
-# 3. محرك التحليل ورسم الشارت السحري
+# 3. محرك DexScreener (لعملات Hyperliquid و DEX)
+# =========================================================
+
+def fetch_dex_sync(symbol):
+    """جلب بيانات العملات اللامركزية من DexScreener"""
+    url = f"https://api.dexscreener.com/latest/dex/search?q={symbol}"
+    try:
+        resp = requests.get(url, timeout=10).json()
+        if "pairs" in resp and len(resp["pairs"]) > 0:
+            pair = resp["pairs"][0]
+            price = float(pair.get("priceUsd", 0))
+            change = float(pair.get("priceChange", {}).get("h24", 0))
+            liquidity = pair.get("liquidity", {}).get("usd", 0)
+            vol = pair.get("volume", {}).get("h24", 0)
+            dex = pair.get("dexId", "Unknown").upper()
+            network = pair.get("chainId", "Unknown").upper()
+            
+            msg = (
+                f"💎 **تحليل منصات اللامركزية (DEX)**\n"
+                f"🪙 العملة: **{symbol.upper()}**\n"
+                f"🔗 الشبكة: `{network}` | المنصة: `{dex}`\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"💰 السعر الحالي: `${price:,.6f}`\n"
+                f"📊 التغير (24س): `{change}%` {'🟢' if change > 0 else '🔴'}\n"
+                f"💧 السيولة: `${liquidity:,.0f}`\n"
+                f"📈 حجم التداول (24س): `${vol:,.0f}`\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "⚠️ *ملاحظة: هذه العملة من منصات DEX، لا يتوفر لها شارت فني عبر Yahoo حالياً.*\n\n"
+                "**إن شاء الله 🤲**"
+            )
+            return msg
+        else:
+            return f"❌ عذراً، لم أتمكن من العثور على بيانات لعملة {symbol} في DexScreener."
+    except Exception as e:
+        return f"❌ خطأ في الاتصال بـ DexScreener: {e}"
+
+# =========================================================
+# 4. محرك التحليل ورسم الشارت السحري (Yahoo Finance)
 # =========================================================
 
 def allowed(update: Update) -> bool:
@@ -87,13 +124,9 @@ def calculate_macd(series):
     return macd_line.iloc[-1], signal_line.iloc[-1]
 
 def generate_chart_with_analysis(df_hist, symbol, timeframe, r1, s1):
-    """دالة ترسم الشارت مع إضافة الأسهم وخطوط الدعم والمقاومة"""
     df_plot = df_hist.tail(40).copy()
+    buy_markers, sell_markers = [], []
     
-    buy_markers = []
-    sell_markers = []
-    
-    # 1. البحث عن النماذج الانعكاسية لرسم الأسهم (تم إصلاح الحروف الكبيرة هنا)
     for i in range(len(df_plot)):
         row = df_plot.iloc[i]
         prev_row = df_plot.iloc[i-1] if i > 0 else row
@@ -105,21 +138,15 @@ def generate_chart_with_analysis(df_hist, symbol, timeframe, r1, s1):
         upper_shadow = h - max(o, c)
         lower_shadow = min(o, c) - l
         
-        bullish = False
-        bearish = False
-        
-        # نماذج الشراء
+        bullish, bearish = False, False
         if (lower_shadow > (body * 2) and upper_shadow <= body and c >= o) or (c > o and pc < po and c >= po and o <= pc):
             bullish = True
-        
-        # نماذج البيع
         if (upper_shadow > (body * 2) and lower_shadow <= body and c <= o) or (c < o and pc > po and c <= po and o >= pc):
             bearish = True
             
         buy_markers.append(l * 0.995 if bullish else np.nan)
         sell_markers.append(h * 1.005 if bearish else np.nan)
 
-    # 2. إضافة الخطوط والعلامات للشارت
     apds = []
     apds.append(mpf.make_addplot([r1]*len(df_plot), color='red', linestyle='--', width=1.5, alpha=0.5))
     apds.append(mpf.make_addplot([s1]*len(df_plot), color='green', linestyle='--', width=1.5, alpha=0.5))
@@ -129,13 +156,10 @@ def generate_chart_with_analysis(df_hist, symbol, timeframe, r1, s1):
     if any(not np.isnan(x) for x in sell_markers):
         apds.append(mpf.make_addplot(sell_markers, type='scatter', markersize=150, marker='v', color='red'))
 
-    # 3. إنشاء الصورة النهائية
     buf = io.BytesIO()
     mc = mpf.make_marketcolors(up='green', down='red', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
-    
     mpf.plot(df_plot, type='candle', style=s, addplot=apds, title=f"\n{symbol} ({timeframe})", figsize=(9, 5), savefig=buf)
-    
     buf.seek(0)
     return buf.getvalue()
 
@@ -219,7 +243,6 @@ async def get_market_data(symbol, timeframe="1d"):
     cache_key = f"{symbol}_{timeframe}"
     if cache_key in cache:
         return cache[cache_key]
-    
     try:
         stats, chart_bytes = await asyncio.to_thread(fetch_yf_sync, symbol, timeframe)
         if stats and chart_bytes:
@@ -237,6 +260,12 @@ async def create_signal_message(data):
         f"📊 الاتجاه: {data['trend']} (`{data['change']:.2f}%`)\n"
         f"📉 RSI: {data['rsi']} | 📈 MACD: {data['macd']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
+        "📖 **دليل قراءة الشارت (للتوضيح):**\n"
+        "🟩 **الخط الأخضر:** يمثل مستوى الدعم (Support)\n"
+        "🟥 **الخط الأحمر:** يمثل مستوى المقاومة (Resistance)\n"
+        "⬆️ **سهم أخضر:** نموذج شرائي (إشارة دخول)\n"
+        "⬇️ **سهم أحمر:** نموذج بيعي (إشارة خروج)\n"
+        "━━━━━━━━━━━━━━━━━━\n"
         f"🧱 **مستويات الدعم والمقاومة:**\n"
         f"🔺 مقاومات (Resistance): `{data['r1']:,.2f}` | `{data['r2']:,.2f}`\n"
         f"🔻 دعومات (Support): `{data['s1']:,.2f}` | `{data['s2']:,.2f}`\n"
@@ -251,14 +280,15 @@ async def create_signal_message(data):
     )
 
 # =========================================================
-# 4. واجهة المستخدم (TELEGRAM HANDLERS)
+# 5. واجهة المستخدم (TELEGRAM HANDLERS)
 # =========================================================
 
 def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("₿ BTC [1d]", callback_data="sig_BTC_1d"), InlineKeyboardButton("◎ SOL [1d]", callback_data="sig_SOL_1d")],
         [InlineKeyboardButton("Ξ ETH [1d]", callback_data="sig_ETH_1d"), InlineKeyboardButton("⚡ سكالبينج [15m]", callback_data="sig_BTC_15m")],
-        [InlineKeyboardButton("⏱️ اختر العملة والفريم", callback_data="select_coin"), InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
+        [InlineKeyboardButton("⏱️ اختر العملة (شارت)", callback_data="select_coin"), InlineKeyboardButton("💎 Hyperliquid/DEX", callback_data="dex_menu")],
+        [InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,7 +306,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "home":
-        await query.message.delete()
+        try: await query.message.delete()
+        except: pass
         await context.bot.send_message(
             chat_id=CHAT_ID, text="🚀 **القائمة الرئيسية:**", 
             reply_markup=main_keyboard(), parse_mode="Markdown"
@@ -287,10 +318,33 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("₿ BTC", callback_data="tf_BTC"), InlineKeyboardButton("◎ SOL", callback_data="tf_SOL")],
             [InlineKeyboardButton("Ξ ETH", callback_data="tf_ETH"), InlineKeyboardButton("🔙 القائمة", callback_data="home")]
         ])
-        await query.message.delete()
+        try: await query.message.delete()
+        except: pass
+        await context.bot.send_message(chat_id=CHAT_ID, text="🪙 **اختر العملة للتحليل الفني:**", reply_markup=kb, parse_mode="Markdown")
+
+    elif data == "dex_menu":
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("PURR", callback_data="dex_PURR"), InlineKeyboardButton("HYPE", callback_data="dex_HYPE")],
+            [InlineKeyboardButton("WIF", callback_data="dex_WIF"), InlineKeyboardButton("PEPE", callback_data="dex_PEPE")],
+            [InlineKeyboardButton("🔙 القائمة", callback_data="home")]
+        ])
+        try: await query.message.delete()
+        except: pass
+        await context.bot.send_message(chat_id=CHAT_ID, text="💎 **اختر عملة من منصات DEX و Hyperliquid:**", reply_markup=kb, parse_mode="Markdown")
+
+    elif data.startswith("dex_") and data != "dex_menu":
+        sym = data.split("_")[1]
+        loading_msg = await context.bot.send_message(chat_id=CHAT_ID, text=f"⏳ جاري جلب بيانات {sym} من DexScreener...")
+        
+        msg = await asyncio.to_thread(fetch_dex_sync, sym)
+        
+        await loading_msg.delete()
+        try: await query.message.delete()
+        except: pass
+        
         await context.bot.send_message(
-            chat_id=CHAT_ID, text="🪙 **اختر العملة:**", 
-            reply_markup=kb, parse_mode="Markdown"
+            chat_id=CHAT_ID, text=msg, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data=data), InlineKeyboardButton("🔙 رجوع", callback_data="home")]])
         )
 
     elif data.startswith("tf_"):
@@ -300,11 +354,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("4h", callback_data=f"sig_{sym}_4h"), InlineKeyboardButton("1d", callback_data=f"sig_{sym}_1d")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="select_coin")]
         ])
-        await query.message.delete()
-        await context.bot.send_message(
-            chat_id=CHAT_ID, text=f"📊 **اختر الفريم لـ {sym}:**", 
-            reply_markup=kb, parse_mode="Markdown"
-        )
+        try: await query.message.delete()
+        except: pass
+        await context.bot.send_message(chat_id=CHAT_ID, text=f"📊 **اختر الفريم لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
 
     elif data.startswith("sig_"):
         _, sym, tf = data.split("_")
@@ -313,10 +365,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats, chart_bytes = await get_market_data(sym, tf)
         
         await loading_msg.delete()
-        try:
-            await query.message.delete()
-        except:
-            pass
+        try: await query.message.delete()
+        except: pass
 
         if not stats:
             await context.bot.send_message(
@@ -328,23 +378,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await create_signal_message(stats)
         
         await context.bot.send_photo(
-            chat_id=CHAT_ID,
-            photo=chart_bytes,
-            caption=msg,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 تحديث (Refresh)", callback_data=data), InlineKeyboardButton("🔙 رجوع", callback_data="home")]
-            ])
+            chat_id=CHAT_ID, photo=chart_bytes, caption=msg, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث (Refresh)", callback_data=data), InlineKeyboardButton("🔙 رجوع", callback_data="home")]])
         )
 
     elif data == "hype":
         try:
             r = await asyncio.to_thread(requests.get, FEAR_GREED_URL, params={"limit": 1}, timeout=10)
             item = r.json()["data"][0]
-            await query.message.delete()
+            try: await query.message.delete()
+            except: pass
             await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"🔥 **Market Sentiment**\nFear & Greed: `{item['value']}/100` ({item['value_classification']})",
+                chat_id=CHAT_ID, text=f"🔥 **Market Sentiment**\nFear & Greed: `{item['value']}/100` ({item['value_classification']})",
                 parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]])
             )
         except Exception as e:
