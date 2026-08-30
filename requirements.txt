@@ -1,9 +1,7 @@
-flask
-gunicorn
-ccxt
 python-telegram-bot
 yfinance
 pandas
 requests
-python-binance
-binance-connector
+aiohttp
+cachetools
+python-dotenv
