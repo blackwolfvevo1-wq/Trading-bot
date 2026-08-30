@@ -4,6 +4,7 @@ import asyncio
 import logging
 import requests
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import matplotlib
 matplotlib.use('Agg')
@@ -19,19 +20,17 @@ from telegram.ext import (
 )
 
 # =========================================================
-# 1. إعدادات البوت (تم إرجاع التوكن والآيدي مباشرة)
+# 1. إعدادات البوت 
 # =========================================================
 
 BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
 CHAT_ID = "6937661753"
 
-# Render يعطي البورت أوتوماتيكياً، كان ما فماش نحطو 8080
 PORT = int(os.getenv("PORT", "8080"))
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 cache = TTLCache(maxsize=100, ttl=120)
 
 # =========================================================
@@ -66,7 +65,7 @@ async def start_web_server(application: Application):
     await site.start()
 
 # =========================================================
-# 3. محرك التحليل، الشموع، الشارت، والدعم والمقاومة
+# 3. محرك التحليل ورسم الشارت السحري
 # =========================================================
 
 def allowed(update: Update) -> bool:
@@ -87,12 +86,59 @@ def calculate_macd(series):
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     return macd_line.iloc[-1], signal_line.iloc[-1]
 
-def generate_chart(df_hist, symbol, timeframe):
-    df_plot = df_hist.tail(40)
+def generate_chart_with_analysis(df_hist, symbol, timeframe, r1, s1):
+    """دالة ترسم الشارت مع إضافة الأسهم وخطوط الدعم والمقاومة"""
+    df_plot = df_hist.tail(40).copy() # ناخذو آخر 40 شمعة
+    
+    buy_markers = []
+    sell_markers = []
+    
+    # 1. البحث عن النماذج الانعكاسية لرسم الأسهم
+    for i in range(len(df_plot)):
+        row = df_plot.iloc[i]
+        prev_row = df_plot.iloc[i-1] if i > 0 else row
+        
+        o, h, l, c = row['open'], row['high'], row['low'], row['close']
+        po, pc = prev_row['open'], prev_row['close']
+        
+        body = abs(c - o)
+        upper_shadow = h - max(o, c)
+        lower_shadow = min(o, c) - l
+        
+        bullish = False
+        bearish = False
+        
+        # نماذج الشراء (مطرقة أو ابتلاع شرائي)
+        if (lower_shadow > (body * 2) and upper_shadow <= body and c >= o) or (c > o and pc < po and c >= po and o <= pc):
+            bullish = True
+        
+        # نماذج البيع (شهاب أو ابتلاع بيعي)
+        if (upper_shadow > (body * 2) and lower_shadow <= body and c <= o) or (c < o and pc > po and c <= po and o >= pc):
+            bearish = True
+            
+        buy_markers.append(l * 0.995 if bullish else np.nan)
+        sell_markers.append(h * 1.005 if bearish else np.nan)
+
+    # 2. إضافة الخطوط والعلامات للشارت (Addplots)
+    apds = []
+    
+    # رسم خط المقاومة (أحمر متقطع) وخط الدعم (أخضر متقطع)
+    apds.append(mpf.make_addplot([r1]*len(df_plot), color='red', linestyle='--', width=1.5, alpha=0.5))
+    apds.append(mpf.make_addplot([s1]*len(df_plot), color='green', linestyle='--', width=1.5, alpha=0.5))
+    
+    # رسم الأسهم
+    if any(not np.isnan(x) for x in buy_markers):
+        apds.append(mpf.make_addplot(buy_markers, type='scatter', markersize=150, marker='^', color='green'))
+    if any(not np.isnan(x) for x in sell_markers):
+        apds.append(mpf.make_addplot(sell_markers, type='scatter', markersize=150, marker='v', color='red'))
+
+    # 3. إنشاء الصورة النهائية
     buf = io.BytesIO()
     mc = mpf.make_marketcolors(up='green', down='red', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
-    mpf.plot(df_plot, type='candle', style=s, title=f"\n{symbol} ({timeframe})", figsize=(8, 5), savefig=buf)
+    
+    mpf.plot(df_plot, type='candle', style=s, addplot=apds, title=f"\n{symbol} ({timeframe})", figsize=(9, 5), savefig=buf)
+    
     buf.seek(0)
     return buf.getvalue()
 
@@ -168,7 +214,8 @@ def fetch_yf_sync(symbol, timeframe):
             "timeframe": timeframe, "r1": r1, "r2": r2, "s1": s1, "s2": s2
         }
         
-        chart_bytes = generate_chart(hist, symbol, timeframe)
+        # استدعاء الدالة الجديدة لرسم الشارت مع التمرير لها مستويات الدعم والمقاومة
+        chart_bytes = generate_chart_with_analysis(hist, symbol, timeframe, r1, s1)
         return stats, chart_bytes
     return None, None
 
@@ -265,7 +312,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("sig_"):
         _, sym, tf = data.split("_")
-        loading_msg = await context.bot.send_message(chat_id=CHAT_ID, text=f"⏳ جاري التحليل ورسم الشارت لـ {sym} على فريم {tf}...")
+        loading_msg = await context.bot.send_message(chat_id=CHAT_ID, text=f"⏳ جاري التحليل ورسم الشارت السحري لـ {sym}...")
         
         stats, chart_bytes = await get_market_data(sym, tf)
         
