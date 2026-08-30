@@ -5,3 +5,5 @@ requests
 aiohttp
 cachetools
 python-dotenv
+matplotlib
+mplfinance
