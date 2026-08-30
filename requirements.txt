@@ -1,5 +1,6 @@
 flask
-python-telegram-bot>=21,<23
+python-telegram-bot
 requests
 pandas
 numpy
+yfinance
