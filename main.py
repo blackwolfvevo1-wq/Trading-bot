@@ -88,18 +88,18 @@ def calculate_macd(series):
 
 def generate_chart_with_analysis(df_hist, symbol, timeframe, r1, s1):
     """دالة ترسم الشارت مع إضافة الأسهم وخطوط الدعم والمقاومة"""
-    df_plot = df_hist.tail(40).copy() # ناخذو آخر 40 شمعة
+    df_plot = df_hist.tail(40).copy()
     
     buy_markers = []
     sell_markers = []
     
-    # 1. البحث عن النماذج الانعكاسية لرسم الأسهم
+    # 1. البحث عن النماذج الانعكاسية لرسم الأسهم (تم إصلاح الحروف الكبيرة هنا)
     for i in range(len(df_plot)):
         row = df_plot.iloc[i]
         prev_row = df_plot.iloc[i-1] if i > 0 else row
         
-        o, h, l, c = row['open'], row['high'], row['low'], row['close']
-        po, pc = prev_row['open'], prev_row['close']
+        o, h, l, c = row['Open'], row['High'], row['Low'], row['Close']
+        po, pc = prev_row['Open'], prev_row['Close']
         
         body = abs(c - o)
         upper_shadow = h - max(o, c)
@@ -108,25 +108,22 @@ def generate_chart_with_analysis(df_hist, symbol, timeframe, r1, s1):
         bullish = False
         bearish = False
         
-        # نماذج الشراء (مطرقة أو ابتلاع شرائي)
+        # نماذج الشراء
         if (lower_shadow > (body * 2) and upper_shadow <= body and c >= o) or (c > o and pc < po and c >= po and o <= pc):
             bullish = True
         
-        # نماذج البيع (شهاب أو ابتلاع بيعي)
+        # نماذج البيع
         if (upper_shadow > (body * 2) and lower_shadow <= body and c <= o) or (c < o and pc > po and c <= po and o >= pc):
             bearish = True
             
         buy_markers.append(l * 0.995 if bullish else np.nan)
         sell_markers.append(h * 1.005 if bearish else np.nan)
 
-    # 2. إضافة الخطوط والعلامات للشارت (Addplots)
+    # 2. إضافة الخطوط والعلامات للشارت
     apds = []
-    
-    # رسم خط المقاومة (أحمر متقطع) وخط الدعم (أخضر متقطع)
     apds.append(mpf.make_addplot([r1]*len(df_plot), color='red', linestyle='--', width=1.5, alpha=0.5))
     apds.append(mpf.make_addplot([s1]*len(df_plot), color='green', linestyle='--', width=1.5, alpha=0.5))
     
-    # رسم الأسهم
     if any(not np.isnan(x) for x in buy_markers):
         apds.append(mpf.make_addplot(buy_markers, type='scatter', markersize=150, marker='^', color='green'))
     if any(not np.isnan(x) for x in sell_markers):
@@ -214,7 +211,6 @@ def fetch_yf_sync(symbol, timeframe):
             "timeframe": timeframe, "r1": r1, "r2": r2, "s1": s1, "s2": s2
         }
         
-        # استدعاء الدالة الجديدة لرسم الشارت مع التمرير لها مستويات الدعم والمقاومة
         chart_bytes = generate_chart_with_analysis(hist, symbol, timeframe, r1, s1)
         return stats, chart_bytes
     return None, None
