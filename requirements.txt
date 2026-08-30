@@ -1,6 +1,7 @@
 flask
+gunicorn
+ccxt
 python-telegram-bot
-requests
-pandas
-numpy
 yfinance
+pandas
+requests
