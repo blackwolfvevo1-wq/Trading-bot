@@ -4,6 +4,7 @@ import threading
 import io
 import requests
 import pandas as pd
+import ccxt
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -27,11 +28,16 @@ BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
 CHAT_ID = "6937661753"
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
+
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ULTRA PRO MAX TRADING BOT V11 ONLINE 🚀"
+    return "ULTRA PRO MAX TRADING BOT V12 ONLINE 🚀"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -79,20 +85,15 @@ def calculate_macd(series):
 
 def get_binance_data(symbol, interval="1d", limit=60):
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}USDT&interval={interval}&limit={limit}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            klines = response.json()
-            if klines and len(klines) > 26:
-                df = pd.DataFrame(klines, columns=[
-                    'open_time', 'open', 'high', 'low', 'close', 'volume', 
-                    'close_time', 'quote_asset_volume', 'trades', 'tb_base', 'tb_quote', 'ignore'
-                ])
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                return df
+        pair = f"{symbol.upper()}/USDT"
+        ohlcv = exchange.fetch_ohlcv(pair, timeframe=interval, limit=limit)
+        if ohlcv and len(ohlcv) > 26:
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            return df
     except Exception as e:
-        print(f"Error fetching binance data: {e}")
+        print(f"CCXT Error: {e}")
     return None
 
 def get_funding_rate(symbol):
@@ -126,8 +127,6 @@ def analyze_market(symbol, interval="1d"):
 
     price = df['close'].iloc[-1]
     open_price = df['open'].iloc[-1]
-    high = df['high'].iloc[-1]
-    low = df['low'].iloc[-1]
     change = ((price - open_price) / open_price) * 100
     trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
 
@@ -183,7 +182,7 @@ def main_keyboard():
 async def start(update, context):
     if not allowed(update): return
     await update.message.reply_text(
-        "🚀 **AURA TRADING BOT V11 (PRO MAX)**\n\nاختر العملة أو الفريم المطلوب:",
+        "🚀 **AURA TRADING BOT V12 (PRO MAX)**\n\nاختر العملة أو الفريم المطلوب:",
         reply_markup=main_keyboard(),
         parse_mode="Markdown"
     )
