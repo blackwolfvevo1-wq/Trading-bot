@@ -4,7 +4,6 @@ import threading
 import requests
 import pandas as pd
 import yfinance as yf
-from binance.spot import Spot
 
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,7 +21,7 @@ from telegram.ext import (
 BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
 CHAT_ID = "6937661753"
 
-# حط مفاتيح الـ Binance API متاعك هنا (للقراءة فقط - آمنة 100%)
+# مفاتيح الـ Binance API (للقراءة فقط - آمنة 100%)
 BINANCE_API_KEY = "jHTRrHkYChfdxVJ0M7dIT7HEFRslsHpKHpekHzphWcUivEd7jjsAfktM3QqKJv"
 BINANCE_SECRET_KEY = "ItjVu541aNZF6GTbWVDsp7m5Jx2gegb0Mr0VROZJJvWQs7aRp8E8hvl8rYeEZLU"
 
@@ -63,7 +62,7 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 # =========================================================
-# TECHNICAL ANALYSIS ENGINE (BINANCE + YFINANCE + RSI + MACD)
+# TECHNICAL ANALYSIS ENGINE (BINANCE PUBLIC API + YFINANCE)
 # =========================================================
 
 def allowed(update):
@@ -88,29 +87,30 @@ def calculate_macd(series):
     return macd_line.iloc[-1], signal_line.iloc[-1]
 
 def get_market_data(symbol_yahoo, symbol_binance):
-    # محاولة أولى عبر Binance API الرسمي
+    # محاولة أولى عبر Binance Public REST API (بدون مكتبات معقدة)
     try:
-        client = Spot(api_key=BINANCE_API_KEY, secret=BINANCE_SECRET_KEY)
-        klines = client.klines(symbol_binance, "1d", limit=60)
-        
-        if klines and len(klines) > 26:
-            df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
-            df['close'] = df['close'].astype(float)
-            df['open'] = df['open'].astype(float)
-            df['high'] = df['high'].astype(float)
-            df['low'] = df['low'].astype(float)
-            
-            price = df['close'].iloc[-1]
-            open_price = df['open'].iloc[-1]
-            high = df['high'].iloc[-1]
-            low = df['low'].iloc[-1]
-            change = ((price - open_price) / open_price) * 100
-            trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
-            
-            rsi_val = calculate_rsi(df['close'])
-            macd_val, signal_val = calculate_macd(df['close'])
-            
-            return process_indicators(symbol_yahoo, price, high, low, open_price, change, trend, rsi_val, macd_val, signal_val, "Binance API الرسمي 🟢")
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol_binance}&interval=1d&limit=60"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            klines = response.json()
+            if klines and len(klines) > 26:
+                df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+                df['close'] = df['close'].astype(float)
+                df['open'] = df['open'].astype(float)
+                df['high'] = df['high'].astype(float)
+                df['low'] = df['low'].astype(float)
+                
+                price = df['close'].iloc[-1]
+                open_price = df['open'].iloc[-1]
+                high = df['high'].iloc[-1]
+                low = df['low'].iloc[-1]
+                change = ((price - open_price) / open_price) * 100
+                trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
+                
+                rsi_val = calculate_rsi(df['close'])
+                macd_val, signal_val = calculate_macd(df['close'])
+                
+                return process_indicators(symbol_yahoo, price, high, low, open_price, change, trend, rsi_val, macd_val, signal_val, "Binance API المباشر 🟢")
     except Exception as e:
         print(f"Binance API error for {symbol_binance}: {e}")
 
@@ -138,7 +138,6 @@ def get_market_data(symbol_yahoo, symbol_binance):
     return None
 
 def process_indicators(symbol, price, high, low, open_price, change, trend, rsi_val, macd_val, signal_val, source):
-    # تحليل الـ RSI
     if rsi_val > 70:
         rsi_status = f"متشبع شراء ({rsi_val:.1f}) ⚠️🔥"
     elif rsi_val < 30:
@@ -146,13 +145,11 @@ def process_indicators(symbol, price, high, low, open_price, change, trend, rsi_
     else:
         rsi_status = f"متوازن ({rsi_val:.1f}) ⚖️"
         
-    # تحليل الـ MACD
     if macd_val > signal_val:
         macd_status = "إيجابي / تقاطع صاعد 🟢"
     else:
         macd_status = "سلبي / تقاطع هابط 🔴"
 
-    # تحليل الشموع
     body = abs(price - open_price)
     total_range = high - low
     upper_shadow = high - max(price, open_price)
@@ -169,7 +166,6 @@ def process_indicators(symbol, price, high, low, open_price, change, trend, rsi_
         elif price < open_price and body > (total_range * 0.5):
             candle = "شمعة حمراء قوية 🔴⚠️"
 
-    # 🧠 خوارزمية القرار الذكي
     bullish_score = 0
     bearish_score = 0
     
@@ -180,7 +176,7 @@ def process_indicators(symbol, price, high, low, open_price, change, trend, rsi_
     if "هابط" in candle or "حمراء" in candle or "شهاب" in candle: bearish_score += 2
     
     if rsi_val < 40: bullish_score += 1
-    if rsi_val > 60: bearish_score += 1
+    if rsi_val > 60: bullish_score += 1
     
     if macd_val > signal_val: bullish_score += 2
     else: bearish_score += 2
@@ -261,8 +257,8 @@ async def start(update, context):
     if not allowed(update):
         return
     await update.message.reply_text(
-        "🚀 ULTRA PRO MAX V8 (Binance API + Yahoo + RSI + MACD)\n\n"
-        "مرحباً بك يا ياسين! البوت يربط الآن بين Binance و Yahoo لضمان دقة الأسعار. اختر العملة:",
+        "🚀 ULTRA PRO MAX V9 (Direct Binance + Yahoo + RSI + MACD)\n\n"
+        "مرحباً بك يا ياسين! البوت يخدم الآن بصفة ممتازة ودون أخطاء تركيب المكتبات. اختر العملة:",
         reply_markup=main_keyboard()
     )
 
@@ -275,7 +271,7 @@ async def buttons(update, context):
     data = query.data
 
     if data == "home":
-        await query.edit_message_text("🚀 ULTRA PRO MAX V8\n\nاختار العملة للتحليل الشامل:", reply_markup=main_keyboard())
+        await query.edit_message_text("🚀 ULTRA PRO MAX V9\n\nاختار العملة للتحليل الشامل:", reply_markup=main_keyboard())
         return
 
     if data == "signal_btc":
