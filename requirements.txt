@@ -6,3 +6,4 @@ yfinance
 pandas
 requests
 python-binance
+binance-connector
