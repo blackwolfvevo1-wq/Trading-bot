@@ -31,7 +31,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ULTRA PRO MAX BOT ONLINE 🚀"
+    return "ULTRA PRO MAX RSI & MACD BOT ONLINE 🚀"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -58,7 +58,7 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 # =========================================================
-# SECURITY & DATA ENGINE (WITH FALLBACK)
+# TECHNICAL ANALYSIS ENGINE (RSI, MACD, CANDLES)
 # =========================================================
 
 def allowed(update):
@@ -67,12 +67,29 @@ def allowed(update):
         return False
     return str(chat.id) == str(CHAT_ID)
 
-def get_market_data(symbol):
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
+
+def calculate_macd(series):
+    exp1 = series.ewm(span=12, adjust=False).mean()
+    exp2 = series.ewm(span=26, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    return macd_line.iloc[-1], signal_line.iloc[-1]
+
+def get_advanced_analysis(symbol):
     try:
         ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="5d")
-        if not hist.empty:
+        hist = ticker.history(period="60d") # نحتاجو بيانات كافية لحساب RSI و MACD بدقة
+        if not hist.empty and len(hist) > 26:
+            close_prices = hist["Close"]
             current = hist.iloc[-1]
+            
             price = float(current["Close"])
             open_price = float(current["Open"])
             high = float(current["High"])
@@ -80,6 +97,24 @@ def get_market_data(symbol):
             change = ((price - open_price) / open_price) * 100
             trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
             
+            # حساب المؤشرات الفنية
+            rsi_val = calculate_rsi(close_prices)
+            macd_val, signal_val = calculate_macd(close_prices)
+            
+            # تحليل الـ RSI
+            if rsi_val > 70:
+                rsi_status = f"متشبع شراء ({rsi_val:.1f}) ⚠️🔥"
+            elif rsi_val < 30:
+                rsi_status = f"متشبع بيع ({rsi_val:.1f}) 💎🟢"
+            else:
+                rsi_status = f"متوازن ({rsi_val:.1f}) ⚖️"
+                
+            # تحليل الـ MACD
+            if macd_val > signal_val:
+                macd_status = "إيجابي / تقاطع صاعد 🟢"
+            else:
+                macd_status = "سلبي / تقاطع هابط 🔴"
+
             # تحليل الشموع
             body = abs(price - open_price)
             total_range = high - low
@@ -97,60 +132,62 @@ def get_market_data(symbol):
                 elif price < open_price and body > (total_range * 0.5):
                     candle = "شمعة حمراء قوية 🔴⚠️"
 
+            # 🧠 خوارزمية القرار الذكي (تدمج الاتجاه + الشموع + RSI + MACD)
+            bullish_score = 0
+            bearish_score = 0
+            
+            if change > 0: bullish_score += 1
+            else: bearish_score += 1
+            
+            if "صاعدة" in candle or "خضراء" in candle or "مطرقة" in candle: bullish_score += 2
+            if "هابط" in candle or "حمراء" in candle or "شهاب" in candle: bearish_score += 2
+            
+            if rsi_val < 40: bullish_score += 1  # فرصة شراء من تحت
+            if rsi_val > 60: bearish_score += 1  # تشبع بيع فوق
+            
+            if macd_val > signal_val: bullish_score += 2
+            else: bearish_score += 2
+
+            if bullish_score > bearish_score + 1:
+                decision = "🟢 **القرار الأنسب: الدخول LONG (شراء)** 🚀\n*(المؤشرات والـ MACD تدعم الصعود)*"
+            elif bearish_score > bullish_score + 1:
+                decision = "🔴 **القرار الأنسب: الدخول SHORT (بيع)** 📉\n*(المؤشرات والـ MACD تدعم الهبوط)*"
+            else:
+                decision = "⚖️ **القرار الأنسب: الانتظار والحياد (Wait)** ⏳\n*(السوق في منطقة تردد بين المؤشرات)*"
+
             return {
                 "symbol": symbol,
                 "price": price,
-                "high": high,
-                "low": low,
                 "change": change,
                 "trend": trend,
-                "candle": candle
+                "rsi": rsi_status,
+                "macd": macd_status,
+                "candle": candle,
+                "decision": decision
             }
     except Exception as e:
-        print(f"Yfinance failed for {symbol}: {e}")
+        print(f"Advanced analysis error for {symbol}: {e}")
 
-    try:
-        coin_id = "bitcoin" if "BTC" in symbol else ("solana" if "SOL" in symbol else "ethereum")
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
-        res = requests.get(url, timeout=10).json()
-        price = float(res[coin_id]["usd"])
-        change = float(res[coin_id]["usd_24h_change"])
-        trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
-        return {
-            "symbol": symbol,
-            "price": price,
-            "high": price * 1.01,
-            "low": price * 0.99,
-            "change": change,
-            "trend": trend,
-            "candle": "بيانات سريعة (CoinGecko) ⚡"
-        }
-    except Exception as err:
-        print(f"Fallback failed too: {err}")
-        return None
+    # Fallback سريع لو صار ضغط
+    return {
+        "symbol": symbol,
+        "price": 0,
+        "change": 0,
+        "trend": "غير متوفر",
+        "rsi": "غير متوفر",
+        "macd": "غير متوفر",
+        "candle": "غير متوفر",
+        "decision": "❌ حدث خطأ مؤقت في جلب المؤشرات."
+    }
 
 def calculate_signal(symbol):
-    data = get_market_data(symbol)
-    if not data:
-        return "❌ عذراً، حدث ضغط في جلب البيانات حالياً. حاول بعد لحظات."
+    data = get_advanced_analysis(symbol)
+    if data["price"] == 0:
+        return "❌ عذراً، حدث ضغط في جلب بيانات التحليل الفني حالياً."
         
     price = data['price']
-    trend = data['trend']
-    candle = data['candle']
     
-    # 🧠 خوارزمية تحديد القرار الأنسب (Smart Decision)
-    if "صاعد" in trend and ("خضراء" in candle or "صاعدة" in candle or "مطرقة" in candle):
-        decision = "🟢 **القرار الأنسب الآن: الدخول LONG (شراء)** 🚀\n*(السوق إيجابي والشموع تدعم الصعود)*"
-    elif "هابط" in trend and ("حمراء" in candle or "هابط" in candle or "شهاب" in candle):
-        decision = "🔴 **القرار الأنسب الآن: الدخول SHORT (بيع)** 📉\n*(السوق سلبي والشموع تدعم الهبوط)*"
-    elif "صاعد" in trend:
-        decision = "🟡 **القرار الأنسب الآن: الميل للـ LONG بحذر** ⚠️\n*(الاتجاه صاعد لكن الشموع مترددة)*"
-    elif "هابط" in trend:
-        decision = "🟡 **القرار الأنسب الآن: الميل للـ SHORT بحذر** ⚠️\n*(الاتجاه هابط لكن الشموع مترددة)*"
-    else:
-        decision = "⚖️ **القرار الأنسب الآن: الانتظار (Wait)** ⏳\n*(السوق متذبذب وغير واضح حالياً)*"
-
-    # حسابات الفيوتشرز (Long & Short)
+    # حسابات الفيوتشرز
     long_sl = price * 0.985
     long_tp1 = price * 1.015
     long_tp2 = price * 1.03
@@ -160,21 +197,21 @@ def calculate_signal(symbol):
     short_tp2 = price * 0.97
 
     return (
-        f"🎯 **تحليل وشموع لعملة {data['symbol']}**\n"
+        f"🎯 **التحليل الفني الشامل لعملة {data['symbol']}**\n"
         f"💰 السعر الحالي: `{price:,.2f}`\n"
-        f"📊 التغير اليومي: {trend} ({data['change']:.2f}%)\n"
-        f"🕯️ **الشموع اليابانية:** {candle}\n"
+        f"📊 الاتجاه: {data['trend']} ({data['change']:.2f}%)\n"
+        f"📉 مؤشر RSI: {data['rsi']}\n"
+        f"📈 مؤشر MACD: {data['macd']}\n"
+        f"🕯️ الشموع: {data['candle']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"{decision}\n"
+        f"{data['decision']}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "🟢 **إعدادات الـ LONG:**\n"
-        f"▪️ الدخول: `~{price:,.2f}`\n"
-        f"🛑 الوقف (SL): `~{long_sl:,.2f}`\n"
-        f"🎯 هدف 1: `~{long_tp1:,.2f}` | هدف 2: `~{long_tp2:,.2f}`\n\n"
+        f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{long_sl:,.2f}`\n"
+        f"🎯 TP1: `~{long_tp1:,.2f}` | TP2: `~{long_tp2:,.2f}`\n\n"
         "🔴 **إعدادات الـ SHORT:**\n"
-        f"▪️ الدخول: `~{price:,.2f}`\n"
-        f"🛑 الوقف (SL): `~{short_sl:,.2f}`\n"
-        f"🎯 هدف 1: `~{short_tp1:,.2f}` | هدف 2: `~{short_tp2:,.2f}`\n"
+        f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{short_sl:,.2f}`\n"
+        f"🎯 TP1: `~{short_tp1:,.2f}` | TP2: `~{short_tp2:,.2f}`\n"
     )
 
 # =========================================================
@@ -184,11 +221,11 @@ def calculate_signal(symbol):
 def main_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("₿ BTC Analysis", callback_data="signal_btc"),
-            InlineKeyboardButton("◎ SOL Analysis", callback_data="signal_sol")
+            InlineKeyboardButton("₿ BTC Pro Analysis", callback_data="signal_btc"),
+            InlineKeyboardButton("◎ SOL Pro Analysis", callback_data="signal_sol")
         ],
         [
-            InlineKeyboardButton("Ξ ETH Analysis", callback_data="signal_eth"),
+            InlineKeyboardButton("Ξ ETH Pro Analysis", callback_data="signal_eth"),
         ],
         [
             InlineKeyboardButton("🔥 Market Sentiment", callback_data="hype"),
@@ -200,8 +237,8 @@ async def start(update, context):
     if not allowed(update):
         return
     await update.message.reply_text(
-        "🚀 ULTRA PRO MAX V6 (Smart AI Decisions)\n\n"
-        "مرحباً بك يا ياسين! اختر العملة للتحليل:",
+        "🚀 ULTRA PRO MAX V7 (RSI + MACD + Smart Decision)\n\n"
+        "مرحباً بك يا ياسين! البوت يحلل الآن بـ RSI و MACD والشموع. اختر العملة:",
         reply_markup=main_keyboard()
     )
 
@@ -214,11 +251,11 @@ async def buttons(update, context):
     data = query.data
 
     if data == "home":
-        await query.edit_message_text("🚀 ULTRA PRO MAX V6\n\nاختار العملة للتحليل:", reply_markup=main_keyboard())
+        await query.edit_message_text("🚀 ULTRA PRO MAX V7\n\nاختار العملة للتحليل الفني الشامل:", reply_markup=main_keyboard())
         return
 
     if data == "signal_btc":
-        await query.edit_message_text("⏳ جاري تحليل السوق واستخراج القرار لـ BTC...")
+        await query.edit_message_text("⏳ جاري حساب RSI, MACD والشموع لـ BTC...")
         msg = calculate_signal("BTC-USD")
         await query.edit_message_text(
             msg,
@@ -228,7 +265,7 @@ async def buttons(update, context):
         return
 
     if data == "signal_sol":
-        await query.edit_message_text("⏳ جاري تحليل السوق واستخراج القرار لـ SOL...")
+        await query.edit_message_text("⏳ جاري حساب RSI, MACD والشموع لـ SOL...")
         msg = calculate_signal("SOL-USD")
         await query.edit_message_text(
             msg,
@@ -238,10 +275,11 @@ async def buttons(update, context):
         return
 
     if data == "signal_eth":
-        await query.edit_message_text("⏳ جاري تحليل السوق واستخراج القرار لـ ETH...")
+        await query.edit_message_text("⏳ جاري حساب RSI, MACD والشموع لـ ETH...")
         msg = calculate_signal("ETH-USD")
         await query.edit_message_text(
             msg,
+            parse_box=None,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="signal_eth"), InlineKeyboardButton("🔙 Menu", callback_data="home")]])
         )
