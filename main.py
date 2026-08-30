@@ -1,11 +1,12 @@
 import os
 import asyncio
-import threading
+import logging
 import requests
 import pandas as pd
 import yfinance as yf
-
-from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+from cachetools import TTLCache
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -15,55 +16,78 @@ from telegram.ext import (
 )
 
 # =========================================================
-# CONFIG
+# 1. إعدادات الحماية والتسجيل (CONFIG & LOGGING)
 # =========================================================
 
-BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
-CHAT_ID = "6937661753"
+# تحميل المتغيرات السرية من ملف .env
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+PORT = int(os.getenv("PORT", "8080"))
+
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
-app = Flask(__name__)
+# إعداد نظام المراقبة (Logging)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-@app.route("/")
-def home():
-    return "AURA TRADING BOT (Yahoo + Candlesticks) ONLINE 🚀"
+# إعداد نظام التخزين المؤقت (Caching) لتفادي حظر Yahoo (يخزن الداتا لـ 120 ثانية)
+cache = TTLCache(maxsize=100, ttl=120)
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
+# =========================================================
+# 2. نظام التنبيهات (TRADINGVIEW WEBHOOK via AIOHTTP)
+# =========================================================
+
+async def handle_webhook(request):
+    """استقبال تنبيهات TradingView وإرسالها لتيليغرام"""
     try:
-        data = request.json
+        data = await request.json()
         if not data:
-            return "No data", 400
+            return web.Response(text="No data", status=400)
+        
         msg = "🚨 **تنبيه TradingView** 🚨\n━━━━━━━━━━━━━━━━━━\n\n"
         for key, value in data.items():
             msg += f"▪️ **{key.upper()}**: {value}\n"
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-        return jsonify({"status": "success"}), 200
+        
+        # استدعاء البوت لإرسال الرسالة
+        bot = request.app['bot']
+        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+        
+        return web.json_response({"status": "success"})
     except Exception as e:
-        return str(e), 500
+        logger.error(f"Webhook error: {e}")
+        return web.Response(text=str(e), status=500)
 
-def run_web():
-    port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+async def start_web_server(application: Application):
+    """تشغيل سيرفر الويب في الخلفية مع البوت"""
+    server = web.Application()
+    server['bot'] = application.bot
+    server.router.add_post('/webhook', handle_webhook)
+    server.router.add_get('/', lambda r: web.Response(text="AURA TRADING BOT ONLINE 🚀"))
+    
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Web server started on port {PORT}")
 
 # =========================================================
-# TECHNICAL & CANDLESTICK ANALYSIS ENGINE
+# 3. محرك التحليل والشموع اليابانية (ANALYSIS ENGINE)
 # =========================================================
 
-def allowed(update):
+def allowed(update: Update) -> bool:
     chat = update.effective_chat
-    if not chat:
-        return False
-    return str(chat.id) == str(CHAT_ID)
+    return chat and str(chat.id) == str(CHAT_ID)
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
+    return (100 - (100 / (1 + rs))).iloc[-1]
 
 def calculate_macd(series):
     exp1 = series.ewm(span=12, adjust=False).mean()
@@ -73,162 +97,124 @@ def calculate_macd(series):
     return macd_line.iloc[-1], signal_line.iloc[-1]
 
 def analyze_candlesticks(df):
-    """دالة قراءة وتحليل الشموع اليابانية للعملة"""
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
+    last, prev = df.iloc[-1], df.iloc[-2]
     o, h, l, c = last['open'], last['high'], last['low'], last['close']
     po, pc = prev['open'], prev['close']
     
     body = abs(c - o)
-    upper_shadow = h - max(o, c)
-    lower_shadow = min(o, c) - l
+    upper_shadow, lower_shadow = h - max(o, c), min(o, c) - l
     
-    candle_notes = []
-    bull_score = 0
-    bear_score = 0
+    notes, bull, bear = [], 0, 0
     
-    # 1. لون الشمعة
     if c > o:
-        candle_notes.append("▪️ الشمعة الحالية خضراء (زخم إيجابي للإغلاق).")
-        bull_score += 1
+        notes.append("▪️ الشمعة الحالية خضراء (زخم إيجابي).")
+        bull += 1
     else:
-        candle_notes.append("▪️ الشمعة الحالية حمراء (ضغط بيعي وإغلاق سلبي).")
-        bear_score += 1
+        notes.append("▪️ الشمعة الحالية حمراء (ضغط بيعي).")
+        bear += 1
 
-    # 2. فحص النماذج الشهيرة (Hammer / Shooting Star)
     if lower_shadow > (body * 2) and upper_shadow <= body:
-        candle_notes.append("🕯️ ظهور شمعة مطرقة (Hammer) سفلية: دليل على رفض الأسعار ودعم احتمال الارتداد صعوداً.")
-        bull_score += 2
+        notes.append("🕯️ شمعة مطرقة (Hammer): دليل على رفض الأسعار ودعم للارتداد.")
+        bull += 2
     elif upper_shadow > (body * 2) and lower_shadow <= body:
-        candle_notes.append("🕯️ ظهور شمعة شهاب (Shooting Star) علوية: إشارة ضعف ورفض للصعود.")
-        bear_score += 2
+        notes.append("🕯️ شمعة شهاب (Shooting Star): إشارة ضعف ورفض للصعود.")
+        bear += 2
 
-    # 3. فحص الابتلاع (Engulfing)
     if c > o and pc < po and c >= po and o <= pc:
-        candle_notes.append("🕯️ نموذج ابتلاع شرائي قوي (Bullish Engulfing): الشمعة الحالية ابتلعت السابقة بالكامل.")
-        bull_score += 3
+        notes.append("🕯️ ابتلاع شرائي (Bullish Engulfing): سيطرة للمشترين.")
+        bull += 3
     elif c < o and pc > po and c <= po and o >= pc:
-        candle_notes.append("🕯️ نموذج ابتلاع بيعي قوي (Bearish Engulfing): سيطرة مطلقة للدببة.")
-        bear_score += 3
+        notes.append("🕯️ ابتلاع بيعي (Bearish Engulfing): سيطرة مطلقة للدببة.")
+        bear += 3
 
-    return candle_notes, bull_score, bear_score
+    return notes, bull, bear
 
-def process_dataframe(df, symbol, timeframe, source_name):
-    price = df['close'].iloc[-1]
-    open_price = df['open'].iloc[-1]
+def process_dataframe(df, symbol, timeframe):
+    price, open_price = df['close'].iloc[-1], df['open'].iloc[-1]
     change = ((price - open_price) / open_price) * 100
     trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
     
     rsi_val = calculate_rsi(df['close'])
     macd_val, signal_val = calculate_macd(df['close'])
     
-    if rsi_val > 70:
-        rsi_status = f"متشبع شراء ({rsi_val:.1f}) ⚠️🔥"
-    elif rsi_val < 30:
-        rsi_status = f"متشبع بيع ({rsi_val:.1f}) 💎🟢"
-    else:
-        rsi_status = f"متوازن ({rsi_val:.1f}) ⚖️"
-        
-    macd_status = "إيجابي / تقاطع صاعد 🟢" if macd_val > signal_val else "سلبي / تقاطع هابط 🔴"
+    rsi_status = f"متشبع شراء ({rsi_val:.1f}) ⚠️" if rsi_val > 70 else f"متشبع بيع ({rsi_val:.1f}) 💎" if rsi_val < 30 else f"متوازن ({rsi_val:.1f}) ⚖️"
+    macd_status = "إيجابي 🟢" if macd_val > signal_val else "سلبي 🔴"
 
-    # دمج نقاط الشموع اليابانية
-    candle_notes, bull_c_score, bear_c_score = analyze_candlesticks(df)
-
-    bullish_score = bull_c_score + (1 if change > 0 else 0) + (2 if macd_val > signal_val else 0)
-    bearish_score = bear_c_score + (1 if change <= 0 else 0) + (2 if macd_val <= signal_val else 0)
-
-    if rsi_val < 40:
-        bullish_score += 1
-    elif rsi_val > 60:
-        bearish_score += 1
+    notes, bull_score, bear_score = analyze_candlesticks(df)
+    
+    bullish_score = bull_score + (1 if change > 0 else 0) + (2 if macd_val > signal_val else 0) + (1 if rsi_val < 40 else 0)
+    bearish_score = bear_score + (1 if change <= 0 else 0) + (2 if macd_val <= signal_val else 0) + (1 if rsi_val > 60 else 0)
 
     if bullish_score > bearish_score + 1:
-        decision = "🟢 **القرار الأنسب: الدخول LONG (شراء)** 🚀"
-        trap = "⚠️ **ثغرة الحكاية (تنبيه):** احذر من كاذب الصعود (Fakeout)؛ تأكد من ثبات السعر فوق مستويات المقاومة."
+        decision, trap = "🟢 **دخول LONG (شراء)** 🚀", "⚠️ احذر من كاذب الصعود؛ تأكد من ثبات السعر فوق المقاومة."
     elif bearish_score > bullish_score + 1:
-        decision = "🔴 **القرار الأنسب: الدخول SHORT (بيع)** 📉"
-        trap = "⚠️ **ثغرة الحكاية (تنبيه):** احذر من ارتداد مفاجئ (Short Squeeze) في حال ظهرت سيولة شرائية قوية."
+        decision, trap = "🔴 **دخول SHORT (بيع)** 📉", "⚠️ احذر من ارتداد مفاجئ (Short Squeeze)."
     else:
-        decision = "⚖️ **القرار الأنسب: الانتظار والحياد (Wait)** ⏳"
-        trap = "⚠️ **ثغرة الحكاية (تنبيه):** السوق في نطاق عرضي متذبذب، التداول في هذه المناطق مغامرة."
+        decision, trap = "⚖️ **الانتظار والحياد (Wait)** ⏳", "⚠️ السوق في نطاق عرضي متذبذب."
 
-    reasons_list = list(candle_notes)
-    if rsi_val < 40:
-        reasons_list.append(f"▪️ مؤشر RSI منخفض ({rsi_val:.1f}) ويدعم الشراء.")
-    elif rsi_val > 60:
-        reasons_list.append(f"▪️ مؤشر RSI مرتفع ({rsi_val:.1f}) وقريب من التشبع.")
-        
-    if macd_val > signal_val:
-        reasons_list.append("▪️ تقاطع الـ MACD إيجابي فوق خط الإشارة.")
-    else:
-        reasons_list.append("▪️ الـ MACD سلبي وتحت خط الإشارة.")
+    reasons = list(notes)
+    reasons.append(f"▪️ RSI يدعم الشراء." if rsi_val < 40 else f"▪️ RSI قريب من التشبع." if rsi_val > 60 else "")
+    reasons.append("▪️ MACD إيجابي." if macd_val > signal_val else "▪️ MACD سلبي.")
 
     return {
-        "symbol": symbol.upper(),
-        "price": price,
-        "change": change,
-        "trend": trend,
-        "rsi": rsi_status,
-        "macd": macd_status,
-        "decision": decision,
-        "reasons": "\n".join(reasons_list),
-        "trap": trap,
-        "timeframe": timeframe,
-        "source": source_name
+        "symbol": symbol.upper(), "price": price, "change": change, "trend": trend,
+        "rsi": rsi_status, "macd": macd_status, "decision": decision,
+        "reasons": "\n".join([r for r in reasons if r]), "trap": trap,
+        "timeframe": timeframe, "source": "Yahoo Finance 📊"
     }
 
-def get_market_data(symbol, timeframe="1d"):
-    try:
-        yf_symbol = f"{symbol.upper()}-USD"
-        period = "60d" if timeframe in ["1d", "4h"] else "5d"
-        ticker = yf.Ticker(yf_symbol)
-        hist = ticker.history(period=period, interval=timeframe)
-        if not hist.empty and len(hist) > 26:
-            df = hist.reset_index()
-            df.columns = [c.lower() for c in df.columns]
-            return process_dataframe(df, symbol, timeframe, "Yahoo Finance 📊")
-    except Exception as e:
-        print(f"Yahoo Error: {e}")
+def fetch_yf_sync(symbol, timeframe):
+    """الدالة المتزامنة لجلب البيانات (تشتغل في Thread منفصل)"""
+    yf_symbol = f"{symbol.upper()}-USD"
+    period = "60d" if timeframe in ["1d", "4h"] else "5d"
+    ticker = yf.Ticker(yf_symbol)
+    hist = ticker.history(period=period, interval=timeframe)
+    if not hist.empty and len(hist) > 26:
+        df = hist.reset_index()
+        df.columns = [c.lower() for c in df.columns]
+        return process_dataframe(df, symbol, timeframe)
     return None
 
-def calculate_signal(symbol, timeframe="1d"):
-    data = get_market_data(symbol, timeframe)
+async def get_market_data(symbol, timeframe="1d"):
+    """دالة Async ذكية تستعمل الكاش والـ Threads"""
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key in cache:
+        return cache[cache_key] # إرجاع الداتا من الكاش بسرعة الضوء
+    
+    try:
+        # تشغيل الدالة في الخلفية باش البوت ما يتبلوكاش
+        data = await asyncio.to_thread(fetch_yf_sync, symbol, timeframe)
+        if data:
+            cache[cache_key] = data # تخزين الداتا الجديدة
+        return data
+    except Exception as e:
+        logger.error(f"Yahoo Error: {e}")
+        return None
+
+async def calculate_signal(symbol, timeframe="1d"):
+    data = await get_market_data(symbol, timeframe)
     if not data:
         return f"❌ عذراً، لم أتمكن من جلب بيانات فريم `{timeframe}` لعملة {symbol}."
         
-    price = data['price']
-    long_sl = price * 0.985
-    long_tp1 = price * 1.015
-    long_tp2 = price * 1.03
-    
-    short_sl = price * 1.015
-    short_tp1 = price * 0.985
-    short_tp2 = price * 0.97
-
+    p = data['price']
     return (
-        f"🎯 **التحليل الشامل لعملة {data['symbol']}** (فريم: `{data['timeframe']}`)\n"
+        f"🎯 **تحليل {data['symbol']}** (فريم: `{data['timeframe']}`)\n"
         f"📡 المصدر: {data['source']}\n"
-        f"💰 السعر الحالي: `{price:,.2f}`\n"
+        f"💰 السعر الحالي: `{p:,.2f}`\n"
         f"📊 الاتجاه: {data['trend']} (`{data['change']:.2f}%`)\n"
-        f"📉 مؤشر RSI: {data['rsi']}\n"
-        f"📈 مؤشر MACD: {data['macd']}\n"
+        f"📉 RSI: {data['rsi']} | 📈 MACD: {data['macd']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"{data['decision']}\n\n"
-        "🕯️ **قراءة الشموع اليابانية والأسباب الفنية:**\n"
+        "🕯️ **الأسباب الفنية:**\n"
         f"{data['reasons']}\n\n"
         f"{data['trap']}\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "🟢 **إعدادات الـ LONG:**\n"
-        f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{long_sl:,.2f}`\n"
-        f"🎯 TP1: `~{long_tp1:,.2f}` | TP2: `~{long_tp2:,.2f}`\n\n"
-        "🔴 **إعدادات الـ SHORT:**\n"
-        f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{short_sl:,.2f}`\n"
-        f"🎯 TP1: `~{short_tp1:,.2f}` | TP2: `~{short_tp2:,.2f}`\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 **LONG:** الدخول: `~{p:,.2f}` | 🛑 SL: `~{p*0.985:,.2f}` | 🎯 TP: `~{p*1.02:,.2f}`\n"
+        f"🔴 **SHORT:** الدخول: `~{p:,.2f}` | 🛑 SL: `~{p*1.015:,.2f}` | 🎯 TP: `~{p*0.98:,.2f}`"
     )
 
 # =========================================================
-# TELEGRAM HANDLERS
+# 4. واجهة المستخدم (TELEGRAM HANDLERS)
 # =========================================================
 
 def main_keyboard():
@@ -238,74 +224,70 @@ def main_keyboard():
         [InlineKeyboardButton("⏱️ اختر العملة والفريم", callback_data="select_coin"), InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
     ])
 
-async def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update): return
     await update.message.reply_text(
-        "🚀 **AURA TRADING BOT (Yahoo + Candlesticks)**\n\nاختر من القائمة الرئيسية:",
-        reply_markup=main_keyboard(),
-        parse_mode="Markdown"
+        "🚀 **AURA TRADING BOT (PRO)**\n\nاختر من القائمة الرئيسية:",
+        reply_markup=main_keyboard(), parse_mode="Markdown"
     )
 
-async def buttons(update, context):
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if str(query.message.chat.id) != str(CHAT_ID):
-        await query.answer()
-        return
+        return await query.answer("Access Denied.", show_alert=True)
     await query.answer()
     data = query.data
 
     if data == "home":
         await query.edit_message_text("🚀 **القائمة الرئيسية:**", reply_markup=main_keyboard(), parse_mode="Markdown")
-        return
-
-    if data == "select_coin":
+    
+    elif data == "select_coin":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("₿ Bitcoin (BTC)", callback_data="tf_BTC"), InlineKeyboardButton("◎ Solana (SOL)", callback_data="tf_SOL")],
-            [InlineKeyboardButton("Ξ Ethereum (ETH)", callback_data="tf_ETH"), InlineKeyboardButton("🔙 القائمة", callback_data="home")]
+            [InlineKeyboardButton("₿ BTC", callback_data="tf_BTC"), InlineKeyboardButton("◎ SOL", callback_data="tf_SOL")],
+            [InlineKeyboardButton("Ξ ETH", callback_data="tf_ETH"), InlineKeyboardButton("🔙 القائمة", callback_data="home")]
         ])
-        await query.edit_message_text("🪙 **اختر العملة اللي تحب تحللها:**", reply_markup=kb, parse_mode="Markdown")
-        return
+        await query.edit_message_text("🪙 **اختر العملة:**", reply_markup=kb, parse_mode="Markdown")
 
-    if data.startswith("tf_"):
+    elif data.startswith("tf_"):
         sym = data.split("_")[1]
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("5 دقائق [5m]", callback_data=f"sig_{sym}_5m"), InlineKeyboardButton("15 دقيقة [15m]", callback_data=f"sig_{sym}_15m")],
-            [InlineKeyboardButton("ساعة [1h]", callback_data=f"sig_{sym}_1h"), InlineKeyboardButton("4 ساعات [4h]", callback_data=f"sig_{sym}_4h")],
-            [InlineKeyboardButton("يومي [1d]", callback_data=f"sig_{sym}_1d")],
-            [InlineKeyboardButton("🔙 رجوع للعملات", callback_data="select_coin")]
+            [InlineKeyboardButton("15m", callback_data=f"sig_{sym}_15m"), InlineKeyboardButton("1h", callback_data=f"sig_{sym}_1h")],
+            [InlineKeyboardButton("4h", callback_data=f"sig_{sym}_4h"), InlineKeyboardButton("1d", callback_data=f"sig_{sym}_1d")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="select_coin")]
         ])
-        await query.edit_message_text(f"📊 **اختر الفريم الزمني لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
-        return
+        await query.edit_message_text(f"📊 **اختر الفريم لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
 
-    if data.startswith("sig_"):
+    elif data.startswith("sig_"):
         _, sym, tf = data.split("_")
-        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf} مع قراءة الشموع اليابانية...")
-        msg = calculate_signal(sym, tf)
-        await query.edit_message_text(
-            msg,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data=data), InlineKeyboardButton("🔙 Menu", callback_data="home")]])
-        )
-        return
+        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf} بدقة عالية...")
+        msg = await calculate_signal(sym, tf) # <- هنا استعملنا await
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 تحديث (Refresh)", callback_data=data), InlineKeyboardButton("🔙 رجوع", callback_data="home")]
+        ]))
 
-    if data == "hype":
+    elif data == "hype":
         try:
-            r = requests.get(FEAR_GREED_URL, params={"limit": 1}, timeout=20).json()
-            item = r["data"][0]
+            r = await asyncio.to_thread(requests.get, FEAR_GREED_URL, params={"limit": 1}, timeout=10)
+            item = r.json()["data"][0]
             await query.edit_message_text(
                 f"🔥 **Market Sentiment**\nFear & Greed: `{item['value']}/100` ({item['value_classification']})",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]])
+                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]])
             )
-        except:
-            await query.edit_message_text("❌ Error.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]]) )
-        return
+        except Exception as e:
+            logger.error(f"Sentiment Error: {e}")
+            await query.edit_message_text("❌ خطأ في جلب البيانات.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]]))
+
+async def post_init(application: Application):
+    """يتم تشغيله تلقائياً عند تشغيل البوت لإطلاق الـ Web Server"""
+    asyncio.create_task(start_web_server(application))
 
 def main():
-    threading.Thread(target=run_web, daemon=True).start()
-    application = Application.builder().token(BOT_TOKEN).build()
+    # بناء البوت وإضافة post_init لتشغيل الويب سيرفر
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(buttons))
+    
+    logger.info("Bot is running...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
