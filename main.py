@@ -68,7 +68,6 @@ def allowed(update):
     return str(chat.id) == str(CHAT_ID)
 
 def get_market_data(symbol):
-    # محاولة أولى عبر yfinance
     try:
         ticker = yf.Ticker(symbol)
         hist = ticker.history(period="5d")
@@ -90,9 +89,9 @@ def get_market_data(symbol):
             candle = "شمعة مستقرة ⚖️"
             if total_range > 0:
                 if lower_shadow > (body * 2):
-                    candle = "مطرقة انعكاسية صاعدة (Hammer) 🔨🟢"
+                    candle = "مطرقة انعكاسية صاعدة 🔨🟢"
                 elif upper_shadow > (body * 2):
-                    candle = "شهاب ساقط انعكاسي هابط (Shooting Star) 🌠🔴"
+                    candle = "شهاب ساقط انعكاسي هابط 🌠🔴"
                 elif price > open_price and body > (total_range * 0.5):
                     candle = "شمعة خضراء قوية 🟢💪"
                 elif price < open_price and body > (total_range * 0.5):
@@ -110,7 +109,6 @@ def get_market_data(symbol):
     except Exception as e:
         print(f"Yfinance failed for {symbol}: {e}")
 
-    # طريقة احتياطية (Fallback API عبر CoinGecko لو yfinance حبس)
     try:
         coin_id = "bitcoin" if "BTC" in symbol else ("solana" if "SOL" in symbol else "ethereum")
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
@@ -125,7 +123,7 @@ def get_market_data(symbol):
             "low": price * 0.99,
             "change": change,
             "trend": trend,
-            "candle": "بيانات سريعة (CoinGecko Fallback) ⚡"
+            "candle": "بيانات سريعة (CoinGecko) ⚡"
         }
     except Exception as err:
         print(f"Fallback failed too: {err}")
@@ -137,7 +135,21 @@ def calculate_signal(symbol):
         return "❌ عذراً، حدث ضغط في جلب البيانات حالياً. حاول بعد لحظات."
         
     price = data['price']
+    trend = data['trend']
+    candle = data['candle']
     
+    # 🧠 خوارزمية تحديد القرار الأنسب (Smart Decision)
+    if "صاعد" in trend and ("خضراء" in candle or "صاعدة" in candle or "مطرقة" in candle):
+        decision = "🟢 **القرار الأنسب الآن: الدخول LONG (شراء)** 🚀\n*(السوق إيجابي والشموع تدعم الصعود)*"
+    elif "هابط" in trend and ("حمراء" in candle or "هابط" in candle or "شهاب" in candle):
+        decision = "🔴 **القرار الأنسب الآن: الدخول SHORT (بيع)** 📉\n*(السوق سلبي والشموع تدعم الهبوط)*"
+    elif "صاعد" in trend:
+        decision = "🟡 **القرار الأنسب الآن: الميل للـ LONG بحذر** ⚠️\n*(الاتجاه صاعد لكن الشموع مترددة)*"
+    elif "هابط" in trend:
+        decision = "🟡 **القرار الأنسب الآن: الميل للـ SHORT بحذر** ⚠️\n*(الاتجاه هابط لكن الشموع مترددة)*"
+    else:
+        decision = "⚖️ **القرار الأنسب الآن: الانتظار (Wait)** ⏳\n*(السوق متذبذب وغير واضح حالياً)*"
+
     # حسابات الفيوتشرز (Long & Short)
     long_sl = price * 0.985
     long_tp1 = price * 1.015
@@ -150,17 +162,19 @@ def calculate_signal(symbol):
     return (
         f"🎯 **تحليل وشموع لعملة {data['symbol']}**\n"
         f"💰 السعر الحالي: `{price:,.2f}`\n"
-        f"🕯️ **الشموع اليابانية:** {data['candle']}\n"
+        f"📊 التغير اليومي: {trend} ({data['change']:.2f}%)\n"
+        f"🕯️ **الشموع اليابانية:** {candle}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{decision}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "🟢 **فرصة شراء (LONG SETUP):**\n"
+        "🟢 **إعدادات الـ LONG:**\n"
         f"▪️ الدخول: `~{price:,.2f}`\n"
         f"🛑 الوقف (SL): `~{long_sl:,.2f}`\n"
-        f"🎯 الهدف 1 (TP1): `~{long_tp1:,.2f}` | الهدف 2: `~{long_tp2:,.2f}`\n\n"
-        "🔴 **فرصة بيع (SHORT SETUP):**\n"
+        f"🎯 هدف 1: `~{long_tp1:,.2f}` | هدف 2: `~{long_tp2:,.2f}`\n\n"
+        "🔴 **إعدادات الـ SHORT:**\n"
         f"▪️ الدخول: `~{price:,.2f}`\n"
         f"🛑 الوقف (SL): `~{short_sl:,.2f}`\n"
-        f"🎯 الهدف 1 (TP1): `~{short_tp1:,.2f}` | الهدف 2: `~{short_tp2:,.2f}`\n\n"
-        f"📊 التغير اليومي: {data['trend']} ({data['change']:.2f}%)"
+        f"🎯 هدف 1: `~{short_tp1:,.2f}` | هدف 2: `~{short_tp2:,.2f}`\n"
     )
 
 # =========================================================
@@ -186,8 +200,8 @@ async def start(update, context):
     if not allowed(update):
         return
     await update.message.reply_text(
-        "🚀 ULTRA PRO MAX V5 (Anti-Crash & Signals)\n\n"
-        "مرحباً بك يا ياسين! البوت محمي ولن يتوقف. اختر العملة للتحليل:",
+        "🚀 ULTRA PRO MAX V6 (Smart AI Decisions)\n\n"
+        "مرحباً بك يا ياسين! اختر العملة للتحليل:",
         reply_markup=main_keyboard()
     )
 
@@ -200,11 +214,11 @@ async def buttons(update, context):
     data = query.data
 
     if data == "home":
-        await query.edit_message_text("🚀 ULTRA PRO MAX V5\n\nاختار العملة للتحليل:", reply_markup=main_keyboard())
+        await query.edit_message_text("🚀 ULTRA PRO MAX V6\n\nاختار العملة للتحليل:", reply_markup=main_keyboard())
         return
 
     if data == "signal_btc":
-        await query.edit_message_text("⏳ جاري تحليل الشموع وحساب الصفقات لـ BTC...")
+        await query.edit_message_text("⏳ جاري تحليل السوق واستخراج القرار لـ BTC...")
         msg = calculate_signal("BTC-USD")
         await query.edit_message_text(
             msg,
@@ -214,7 +228,7 @@ async def buttons(update, context):
         return
 
     if data == "signal_sol":
-        await query.edit_message_text("⏳ جاري تحليل الشموع وحساب الصفقات لـ SOL...")
+        await query.edit_message_text("⏳ جاري تحليل السوق واستخراج القرار لـ SOL...")
         msg = calculate_signal("SOL-USD")
         await query.edit_message_text(
             msg,
@@ -224,7 +238,7 @@ async def buttons(update, context):
         return
 
     if data == "signal_eth":
-        await query.edit_message_text("⏳ جاري تحليل الشموع وحساب الصفقات لـ ETH...")
+        await query.edit_message_text("⏳ جاري تحليل السوق واستخراج القرار لـ ETH...")
         msg = calculate_signal("ETH-USD")
         await query.edit_message_text(
             msg,
