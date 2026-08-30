@@ -76,10 +76,9 @@ def get_market_data(symbol, timeframe="1d"):
     try:
         yf_symbol = f"{symbol.upper()}-USD"
         
-        # تحديد الـ period المناسب لكل فريم باش Yahoo ما يرفضش الطلب
         period = "60d"
         if timeframe in ["1m", "5m", "15m"]:
-            period = "5d"  # الفريمات القصيرة يعطيها Yahoo آخر 5 أيام فقط
+            period = "5d"
         elif timeframe in ["1h", "90m"]:
             period = "30d"
 
@@ -107,14 +106,43 @@ def get_market_data(symbol, timeframe="1d"):
                 
             macd_status = "إيجابي / تقاطع صاعد 🟢" if macd_val > signal_val else "سلبي / تقاطع هابط 🔴"
 
-            bullish, bearish = (1 if change > 0 else 0), (0 if change > 0 else 1)
-            if macd_val > signal_val: bullish += 2
-            else: bearish += 2
+            # خوارزمية القرار مع الأسباب والثغرات
+            bullish_score = 0
+            bearish_score = 0
+            reasons = []
 
-            if bullish > bearish:
-                decision = "🟢 **القرار الأنسب: LONG (شراء)** 🚀"
+            if change > 0:
+                bullish_score += 1
+                reasons.append("▪️ التغير الإيجابي في الشمعة الحالية يدعم الزخم الصاعد.")
             else:
-                decision = "🔴 **القرار الأنسب: SHORT (بيع)** 📉"
+                bearish_score += 1
+                reasons.append("▪️ الضغط السلبي في السعر يرجح كفة الهبوط.")
+
+            if rsi_val < 40:
+                bullish_score += 1
+                reasons.append(f"▪️ مؤشر RSI في مناطق منخفضة ({rsi_val:.1f})، مما يلمح لاحتمال ارتداد صعودي (تشبع بيع).")
+            elif rsi_val > 60:
+                bearish_score += 1
+                reasons.append(f"▪️ مؤشر RSI مرتفع ({rsi_val:.1f})، مما يشير لاقتراب السعر من مناطق تشبع الشراء وجني الأرباح.")
+
+            if macd_val > signal_val:
+                bullish_score += 2
+                reasons.append("▪️ خط الـ MACD يتقاطع إيجابياً فوق خط الإشارة (دعم قوي للـ LONG).")
+            else:
+                bearish_score += 2
+                reasons.append("▪️ خط الـ MACD سلبي وتحت خط الإشارة (ضغط بيعي ودعم للـ SHORT).")
+
+            if bullish_score > bearish_score + 1:
+                decision = "🟢 **القرار الأنسب: الدخول LONG (شراء)** 🚀"
+                trap = "⚠️ **ثغرة الحكاية (تنبيه):** احذر من كاذب الصعود (Fakeout)؛ إذا فشل السعر في اختراق المقاومة القريبة، قد ينعكس لضرب الـ Stop Loss."
+            elif bearish_score > bullish_score + 1:
+                decision = "🔴 **القرار الأنسب: الدخول SHORT (بيع)** 📉"
+                trap = "⚠️ **ثغرة الحكاية (تنبيه):** احذر من ارتداد مفاجئ (Short Squeeze) في حال دخل سيولة شرائية فجأة من مناطق الدعم."
+            else:
+                decision = "⚖️ **القرار الأنسب: الانتظار والحياد (Wait)** ⏳"
+                trap = "⚠️ **ثغرة الحكاية (تنبيه):** السوق في منطقة عرضية غير واضحة، التداول هنا مغامرة غير محسوبة."
+
+            reasons_text = "\n".join(reasons)
 
             return {
                 "symbol": symbol.upper(),
@@ -124,6 +152,8 @@ def get_market_data(symbol, timeframe="1d"):
                 "rsi": rsi_status,
                 "macd": macd_status,
                 "decision": decision,
+                "reasons": reasons_text,
+                "trap": trap,
                 "timeframe": timeframe,
                 "source": "Yahoo Finance 📊"
             }
@@ -135,7 +165,7 @@ def get_market_data(symbol, timeframe="1d"):
 def calculate_signal(symbol, timeframe="1d"):
     data = get_market_data(symbol, timeframe)
     if not data:
-        return f"❌ عذراً، لم أتمكن من جلب بيانات فريم `{timeframe}` لعملة {symbol} من Yahoo."
+        return f"❌ عذراً، لم أتمكن من جلب بيانات فريم `{timeframe}` لعملة {symbol}."
         
     price = data['price']
     long_sl = price * 0.985
@@ -154,7 +184,10 @@ def calculate_signal(symbol, timeframe="1d"):
         f"📉 مؤشر RSI: {data['rsi']}\n"
         f"📈 مؤشر MACD: {data['macd']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"{data['decision']}\n"
+        f"{data['decision']}\n\n"
+        "🔍 **الأسباب الفنية:**\n"
+        f"{data['reasons']}\n\n"
+        f"{data['trap']}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "🟢 **إعدادات الـ LONG:**\n"
         f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{long_sl:,.2f}`\n"
@@ -171,14 +204,14 @@ def calculate_signal(symbol, timeframe="1d"):
 def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("₿ BTC [1d]", callback_data="sig_BTC_1d"), InlineKeyboardButton("◎ SOL [1d]", callback_data="sig_SOL_1d")],
-        [InlineKeyboardButton("Ξ ETH [1h]", callback_data="sig_ETH_1h"), InlineKeyboardButton("⚡ BTC [15m]", callback_data="sig_BTC_15m")],
-        [InlineKeyboardButton("⏱️ اختر العملة والفريم", callback_data="select_custom"), InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
+        [InlineKeyboardButton("Ξ ETH [1d]", callback_data="sig_ETH_1d"), InlineKeyboardButton("⚡ سكالبينج [15m]", callback_data="sig_BTC_15m")],
+        [InlineKeyboardButton("⏱️ اختر العملة والفريم", callback_data="select_coin"), InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
     ])
 
 async def start(update, context):
     if not allowed(update): return
     await update.message.reply_text(
-        "🚀 **AURA TRADING BOT (Yahoo Finance Pure)**\n\nيدعم جميع الفريمات (5m, 15m, 1h, 4h, 1d) بدقة وسهولة. اختر من القائمة:",
+        "🚀 **AURA TRADING BOT (Smart Analysis)**\n\nاختر من القائمة الرئيسية:",
         reply_markup=main_keyboard(),
         parse_mode="Markdown"
     )
@@ -195,18 +228,30 @@ async def buttons(update, context):
         await query.edit_message_text("🚀 **القائمة الرئيسية:**", reply_markup=main_keyboard(), parse_mode="Markdown")
         return
 
-    if data == "select_custom":
+    if data == "select_coin":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("BTC [5m]", callback_data="sig_BTC_5m"), InlineKeyboardButton("BTC [15m]", callback_data="sig_BTC_15m")],
-            [InlineKeyboardButton("BTC [1h]", callback_data="sig_BTC_1h"), InlineKeyboardButton("BTC [4h]", callback_data="sig_BTC_4h")],
-            [InlineKeyboardButton("BTC [1d]", callback_data="sig_BTC_1d"), InlineKeyboardButton("🔙 القائمة", callback_data="home")]
+            [InlineKeyboardButton("₿ Bitcoin (BTC)", callback_data="tf_BTC"), InlineKeyboardButton("◎ Solana (SOL)", callback_data="tf_SOL")],
+            [InlineKeyboardButton("Ξ Ethereum (ETH)", callback_data="tf_ETH"), InlineKeyboardButton("🔙 القائمة", callback_data="home")]
         ])
-        await query.edit_message_text("📊 **اختر الفريم المطلوب لـ BTC:**", reply_markup=kb, parse_mode="Markdown")
+        await query.edit_message_text("🪙 **اختر العملة اللي تحب تحللها:**", reply_markup=kb, parse_mode="Markdown")
+        return
+
+    if data.startswith("tf_"):
+        sym = data.data.split("_")[1] if hasattr(data, 'data') else data.split("_")[1]
+        # إصلاح استخراج الرمز تفادياً لأي خطأ
+        sym = data.split("_")[1]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("5 دقائق [5m]", callback_data=f"sig_{sym}_5m"), InlineKeyboardButton("15 دقيقة [15m]", callback_data=f"sig_{sym}_15m")],
+            [InlineKeyboardButton("ساعة [1h]", callback_data=f"sig_{sym}_1h"), InlineKeyboardButton("4 ساعات [4h]", callback_data=f"sig_{sym}_4h")],
+            [InlineKeyboardButton("يومي [1d]", callback_data=f"sig_{sym}_1d")],
+            [InlineKeyboardButton("🔙 رجوع للعملات", callback_data="select_coin")]
+        ])
+        await query.edit_message_text(f"📊 **اختر الفريم الزمني لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
         return
 
     if data.startswith("sig_"):
         _, sym, tf = data.split("_")
-        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf} عبر Yahoo...")
+        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf} مع استخراج الأسباب والثغرات...")
         msg = calculate_signal(sym, tf)
         await query.edit_message_text(
             msg,
