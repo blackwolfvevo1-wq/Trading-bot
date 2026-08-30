@@ -1,6 +1,7 @@
 python-telegram-bot
 yfinance
 pandas
+numpy
 requests
 aiohttp
 cachetools
