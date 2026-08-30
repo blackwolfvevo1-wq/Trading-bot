@@ -1,12 +1,10 @@
 import os
 import asyncio
 import threading
-import io
 import requests
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import yfinance as yf
+from binance.spot import Spot
 
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,38 +12,50 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    filters,
     ContextTypes,
 )
 
 # =========================================================
-# CONFIG
+# CONFIG & BINANCE API KEYS
 # =========================================================
 
 BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
 CHAT_ID = "6937661753"
+
+# حط مفاتيح الـ Binance API متاعك هنا (للقراءة فقط - آمنة 100%)
+BINANCE_API_KEY = "jHTRrHkYChfdxVJ0M7dIT7HEFRslsHpKHpekHzphWcUivEd7jjsAfktM3QqKJv"
+BINANCE_SECRET_KEY = "ItjVu541aNZF6GTbWVDsp7m5Jx2gegb0Mr0VROZJJvWQs7aRp8E8hvl8rYeEZLU"
+
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
+
+# =========================================================
+# RENDER WEB SERVER & TRADINGVIEW WEBHOOK
+# =========================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ULTRA PRO MAX TRADING BOT V10 ONLINE 🚀"
+    return "ULTRA PRO MAX BINANCE + YFINANCE BOT ONLINE 🚀"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    """يستقبل تنبيهات TradingView (Long / Short) ويبعثها لتيلجرام"""
     try:
         data = request.json
         if not data:
             return "No data", 400
+
         msg = "🚨 **تنبيه TradingView (Futures)** 🚨\n━━━━━━━━━━━━━━━━━━\n\n"
         for key, value in data.items():
             msg += f"▪️ **{key.upper()}**: {value}\n"
+        
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+        
         return jsonify({"status": "success"}), 200
     except Exception as e:
+        print("Webhook Error:", e)
         return str(e), 500
 
 def run_web():
@@ -53,7 +63,7 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 # =========================================================
-# INDICATORS & ANALYSIS ENGINE
+# TECHNICAL ANALYSIS ENGINE (BINANCE + YFINANCE + RSI + MACD)
 # =========================================================
 
 def allowed(update):
@@ -77,118 +87,183 @@ def calculate_macd(series):
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     return macd_line.iloc[-1], signal_line.iloc[-1]
 
-def get_binance_data(symbol, interval="1d", limit=60):
+def get_market_data(symbol_yahoo, symbol_binance):
+    # محاولة أولى عبر Binance API الرسمي
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}USDT&interval={interval}&limit={limit}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            klines = response.json()
-            if klines and len(klines) > 26:
-                df = pd.DataFrame(klines, columns=[
-                    'open_time', 'open', 'high', 'low', 'close', 'volume', 
-                    'close_time', 'quote_asset_volume', 'trades', 'tb_base', 'tb_quote', 'ignore'
-                ])
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                return df
+        client = Spot(api_key=BINANCE_API_KEY, secret=BINANCE_SECRET_KEY)
+        klines = client.klines(symbol_binance, "1d", limit=60)
+        
+        if klines and len(klines) > 26:
+            df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+            df['close'] = df['close'].astype(float)
+            df['open'] = df['open'].astype(float)
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            
+            price = df['close'].iloc[-1]
+            open_price = df['open'].iloc[-1]
+            high = df['high'].iloc[-1]
+            low = df['low'].iloc[-1]
+            change = ((price - open_price) / open_price) * 100
+            trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
+            
+            rsi_val = calculate_rsi(df['close'])
+            macd_val, signal_val = calculate_macd(df['close'])
+            
+            return process_indicators(symbol_yahoo, price, high, low, open_price, change, trend, rsi_val, macd_val, signal_val, "Binance API الرسمي 🟢")
     except Exception as e:
-        print(f"Error fetching binance data: {e}")
+        print(f"Binance API error for {symbol_binance}: {e}")
+
+    # محاولة ثانية عبر Yahoo Finance (Fallback)
+    try:
+        ticker = yf.Ticker(symbol_yahoo)
+        hist = ticker.history(period="60d")
+        if not hist.empty and len(hist) > 26:
+            close_prices = hist["Close"]
+            current = hist.iloc[-1]
+            price = float(current["Close"])
+            open_price = float(current["Open"])
+            high = float(current["High"])
+            low = float(current["Low"])
+            change = ((price - open_price) / open_price) * 100
+            trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
+            
+            rsi_val = calculate_rsi(close_prices)
+            macd_val, signal_val = calculate_macd(close_prices)
+            
+            return process_indicators(symbol_yahoo, price, high, low, open_price, change, trend, rsi_val, macd_val, signal_val, "Yahoo Finance 📊")
+    except Exception as e:
+        print(f"Yfinance failed for {symbol_yahoo}: {e}")
+
     return None
 
-def get_funding_rate(symbol):
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}USDT"
-        res = requests.get(url, timeout=5).json()
-        rate = float(res.get("lastFundingRate", 0)) * 100
-        return f"{rate:.4f}%"
-    except:
-        return "غير متوفر"
-
-def generate_chart_image(df, symbol, interval):
-    plt.figure(figsize=(8, 4))
-    plt.plot(df['close'], label='Price', color='#00ffcc', linewidth=1.5)
-    plt.title(f"{symbol} - {interval} Chart", color='white')
-    plt.gca().set_facecolor('#1e1e1e')
-    plt.gcf().patch.set_facecolor('#121212')
-    plt.tick_params(colors='white')
-    plt.grid(True, linestyle='--', alpha=0.3)
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
-
-def analyze_market(symbol, interval="1d"):
-    df = get_binance_data(symbol, interval)
-    if df is None:
-        return None
-
-    price = df['close'].iloc[-1]
-    open_price = df['open'].iloc[-1]
-    high = df['high'].iloc[-1]
-    low = df['low'].iloc[-1]
-    change = ((price - open_price) / open_price) * 100
-    trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
-
-    rsi_val = calculate_rsi(df['close'])
-    macd_val, signal_val = calculate_macd(df['close'])
-    funding = get_funding_rate(symbol)
-
-    # RSI status
+def process_indicators(symbol, price, high, low, open_price, change, trend, rsi_val, macd_val, signal_val, source):
+    # تحليل الـ RSI
     if rsi_val > 70:
         rsi_status = f"متشبع شراء ({rsi_val:.1f}) ⚠️🔥"
     elif rsi_val < 30:
         rsi_status = f"متشبع بيع ({rsi_val:.1f}) 💎🟢"
     else:
         rsi_status = f"متوازن ({rsi_val:.1f}) ⚖️"
-
-    # MACD status
-    macd_status = "إيجابي / تقاطع صاعد 🟢" if macd_val > signal_val else "سلبي / تقاطع هابط 🔴"
-
-    # Decision
-    bullish, bearish = 0, 1 if change > 0 else 0, 0 if change > 0 else 1
-    if macd_val > signal_val: bullish += 2
-    else: bearish += 2
-
-    if bullish > bearish:
-        decision = "🟢 **القرار الأنسب: LONG (شراء)** 🚀"
+        
+    # تحليل الـ MACD
+    if macd_val > signal_val:
+        macd_status = "إيجابي / تقاطع صاعد 🟢"
     else:
-        decision = "🔴 **القرار الأنسب: SHORT (بيع)** 📉"
+        macd_status = "سلبي / تقاطع هابط 🔴"
 
-    chart_buf = generate_chart_image(df, symbol, interval)
+    # تحليل الشموع
+    body = abs(price - open_price)
+    total_range = high - low
+    upper_shadow = high - max(price, open_price)
+    lower_shadow = min(price, open_price) - low
+    
+    candle = "شمعة مستقرة ⚖️"
+    if total_range > 0:
+        if lower_shadow > (body * 2):
+            candle = "مطرقة انعكاسية صاعدة 🔨🟢"
+        elif upper_shadow > (body * 2):
+            candle = "شهاب ساقط انعكاسي هابط 🌠🔴"
+        elif price > open_price and body > (total_range * 0.5):
+            candle = "شمعة خضراء قوية 🟢💪"
+        elif price < open_price and body > (total_range * 0.5):
+            candle = "شمعة حمراء قوية 🔴⚠️"
 
-    msg = (
-        f"🎯 **التحليل الفني الشامل لـ {symbol.upper()}** (فريم: `{interval}`)\n"
-        f"💰 السعر: `{price:,.2f}` | التغيير: {trend} (`{change:.2f}%`)\n"
-        f"📉 RSI: {rsi_status}\n"
-        f"📈 MACD: {macd_status}\n"
-        f"💸 نسبة التمويل (Funding Rate): `{funding}`\n"
+    # 🧠 خوارزمية القرار الذكي
+    bullish_score = 0
+    bearish_score = 0
+    
+    if change > 0: bullish_score += 1
+    else: bearish_score += 1
+    
+    if "صاعدة" in candle or "خضراء" in candle or "مطرقة" in candle: bullish_score += 2
+    if "هابط" in candle or "حمراء" in candle or "شهاب" in candle: bearish_score += 2
+    
+    if rsi_val < 40: bullish_score += 1
+    if rsi_val > 60: bearish_score += 1
+    
+    if macd_val > signal_val: bullish_score += 2
+    else: bearish_score += 2
+
+    if bullish_score > bearish_score + 1:
+        decision = "🟢 **القرار الأنسب: الدخول LONG (شراء)** 🚀\n*(المؤشرات والـ MACD تدعم الصعود)*"
+    elif bearish_score > bullish_score + 1:
+        decision = "🔴 **القرار الأنسب: الدخول SHORT (بيع)** 📉\n*(المؤشرات والـ MACD تدعم الهبوط)*"
+    else:
+        decision = "⚖️ **القرار الأنسب: الانتظار والحياد (Wait)** ⏳\n*(السوق في منطقة تردد بين المؤشرات)*"
+
+    return {
+        "symbol": symbol.replace("-USD", ""),
+        "price": price,
+        "change": change,
+        "trend": trend,
+        "rsi": rsi_status,
+        "macd": macd_status,
+        "candle": candle,
+        "decision": decision,
+        "source": source
+    }
+
+def calculate_signal(symbol_yahoo, symbol_binance):
+    data = get_market_data(symbol_yahoo, symbol_binance)
+    if not data:
+        return "❌ عذراً، حدث ضغط في جلب البيانات من المنصات حالياً."
+        
+    price = data['price']
+    
+    long_sl = price * 0.985
+    long_tp1 = price * 1.015
+    long_tp2 = price * 1.03
+    
+    short_sl = price * 1.015
+    short_tp1 = price * 0.985
+    short_tp2 = price * 0.97
+
+    return (
+        f"🎯 **التحليل الشامل لعملة {data['symbol']}**\n"
+        f"📡 المصدر: {data['source']}\n"
+        f"💰 السعر الحالي: `{price:,.2f}`\n"
+        f"📊 الاتجاه: {data['trend']} ({data['change']:.2f}%)\n"
+        f"📉 مؤشر RSI: {data['rsi']}\n"
+        f"📈 مؤشر MACD: {data['macd']}\n"
+        f"🕯️ الشموع: {data['candle']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"{decision}\n"
+        f"{data['decision']}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"🛑 SL مقترح: `~{price * 0.985:,.2f}`\n"
-        f"🎯 TP1 مقترح: `~{price * 1.015:,.2f}`"
+        "🟢 **إعدادات الـ LONG:**\n"
+        f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{long_sl:,.2f}`\n"
+        f"🎯 TP1: `~{long_tp1:,.2f}` | TP2: `~{long_tp2:,.2f}`\n\n"
+        "🔴 **إعدادات الـ SHORT:**\n"
+        f"▪️ الدخول: `~{price:,.2f}` | 🛑 SL: `~{short_sl:,.2f}`\n"
+        f"🎯 TP1: `~{short_tp1:,.2f}` | TP2: `~{short_tp2:,.2f}`\n"
     )
-    return msg, chart_buf
 
 # =========================================================
-# TELEGRAM BOT HANDLERS
+# MENU & BUTTONS
 # =========================================================
 
 def main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("₿ BTC Analysis", callback_data="an_btc"), InlineKeyboardButton("◎ SOL Analysis", callback_data="an_sol")],
-        [InlineKeyboardButton("Ξ ETH Analysis", callback_data="an_eth"), InlineKeyboardButton("📊 فريمات قصيرة (5m / 15m)", callback_data="tf_menu")],
-        [InlineKeyboardButton("🔥 Market Sentiment", callback_data="hype"), InlineKeyboardButton("🔍 بحث عن عملة", callback_data="search_prompt")]
+        [
+            InlineKeyboardButton("₿ BTC Pro Analysis", callback_data="signal_btc"),
+            InlineKeyboardButton("◎ SOL Pro Analysis", callback_data="signal_sol")
+        ],
+        [
+            InlineKeyboardButton("Ξ ETH Pro Analysis", callback_data="signal_eth"),
+        ],
+        [
+            InlineKeyboardButton("🔥 Market Sentiment", callback_data="hype"),
+            InlineKeyboardButton("🚨 Webhook Info", callback_data="webhook_info")
+        ]
     ])
 
 async def start(update, context):
-    if not allowed(update): return
+    if not allowed(update):
+        return
     await update.message.reply_text(
-        "🚀 **AURA TRADING BOT V10 (PRO MAX)**\n\nاختر العملة أو الميزة المطلوبة:",
-        reply_markup=main_keyboard(),
-        parse_mode="Markdown"
+        "🚀 ULTRA PRO MAX V8 (Binance API + Yahoo + RSI + MACD)\n\n"
+        "مرحباً بك يا ياسين! البوت يربط الآن بين Binance و Yahoo لضمان دقة الأسعار. اختر العملة:",
+        reply_markup=main_keyboard()
     )
 
 async def buttons(update, context):
@@ -200,70 +275,64 @@ async def buttons(update, context):
     data = query.data
 
     if data == "home":
-        await query.edit_message_text("🚀 **القائمة الرئيسية:**", reply_markup=main_keyboard(), parse_mode="Markdown")
+        await query.edit_message_text("🚀 ULTRA PRO MAX V8\n\nاختار العملة للتحليل الشامل:", reply_markup=main_keyboard())
         return
 
-    if data.startswith("an_"):
-        sym = data.split("_")[1]
-        await query.edit_message_text(f"⏳ جاري تحليل {sym.upper()} على فريم اليوم (1d)...")
-        res = analyze_market(sym, "1d")
-        if res:
-            msg, chart = res
-            await query.message.reply_photo(photo=chart, caption=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
-        else:
-            await query.edit_message_text("❌ حدث خطأ في جلب البيانات.", reply_markup=main_keyboard())
+    if data == "signal_btc":
+        await query.edit_message_text("⏳ جاري جلب البيانات من Binance لـ BTC...")
+        msg = calculate_signal("BTC-USD", "BTCUSDT")
+        await query.edit_message_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="signal_btc"), InlineKeyboardButton("🔙 Menu", callback_data="home")]])
+        )
         return
 
-    if data == "tf_menu":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ BTC [5m]", callback_data="tf_BTC_5m"), InlineKeyboardButton("⚡ BTC [15m]", callback_data="tf_BTC_15m")],
-            [InlineKeyboardButton("⚡ SOL [5m]", callback_data="tf_SOL_5m"), InlineKeyboardButton("⚡ SOL [15m]", callback_data="tf_SOL_15m")],
-            [InlineKeyboardButton("🔙 القائمة", callback_data="home")]
-        ])
-        await query.edit_message_text("⚡ **اختر العملة والفريم القصير للسكالبينج:**", reply_markup=kb, parse_mode="Markdown")
+    if data == "signal_sol":
+        await query.edit_message_text("⏳ جاري جلب البيانات من Binance لـ SOL...")
+        msg = calculate_signal("SOL-USD", "SOLUSDT")
+        await query.edit_message_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="signal_sol"), InlineKeyboardButton("🔙 Menu", callback_data="home")]])
+        )
         return
 
-    if data.startswith("tf_"):
-        _, sym, tf = data.split("_")
-        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf}...")
-        res = analyze_market(sym, tf)
-        if res:
-            msg, chart = res
-            await query.message.reply_photo(photo=chart, caption=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
-        return
-
-    if data == "search_prompt":
-        context.user_data['waiting_for_coin'] = True
-        await query.edit_message_text("✍️ **اكتب رمز العملة الآن في الرسائل (مثلاً: ADA, XRP, DOGE):**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
+    if data == "signal_eth":
+        await query.edit_message_text("⏳ جاري جلب البيانات من Binance لـ ETH...")
+        msg = calculate_signal("ETH-USD", "ETHUSDT")
+        await query.edit_message_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="signal_eth"), InlineKeyboardButton("🔙 Menu", callback_data="home")]])
+        )
         return
 
     if data == "hype":
         try:
-            r = requests.get(FEAR_GREED_URL, params={"limit": 1}, timeout=10).json()
+            r = requests.get(FEAR_GREED_URL, params={"limit": 1}, timeout=20).json()
             item = r["data"][0]
-            await query.edit_message_text(f"🔥 **مؤشر الخمع والطمع (Fear & Greed):**\n`{item['value']}/100` ({item['value_classification']})", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
+            await query.edit_message_text(
+                f"🔥 Market Sentiment\nFear & Greed: {item['value']}/100 ({item['value_classification']})",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]])
+            )
         except:
-            await query.edit_message_text("❌ خطأ.", reply_markup=main_keyboard())
+            await query.edit_message_text("❌ Error.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]]))
+        return
 
-async def handle_message(update, context):
-    if not allowed(update): return
-    if context.user_data.get('waiting_for_coin'):
-        coin = update.message.text.strip().upper()
-        context.user_data['waiting_for_coin'] = False
-        await update.message.reply_text(f"⏳ جاري تحليل العملة {coin}...")
-        res = analyze_market(coin, "1d")
-        if res:
-            msg, chart = res
-            await update.message.reply_photo(photo=chart, caption=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
-        else:
-            await update.message.reply_text(f"❌ لم أتمكن من العثور على العملة {coin} أو حدث خطأ.", reply_markup=main_keyboard())
+    if data == "webhook_info":
+        await query.edit_message_text(
+            "🚨 Webhook URL:\n`https://your-app.onrender.com/webhook`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="home")]])
+        )
+        return
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(buttons))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
