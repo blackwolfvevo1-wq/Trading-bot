@@ -4,7 +4,6 @@ import threading
 import io
 import requests
 import pandas as pd
-import ccxt
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -28,16 +27,11 @@ BOT_TOKEN = "8829847415:AAGoiHSjaSfZ_Bjm1kC7uGh0BQ7FCcDMhHU"
 CHAT_ID = "6937661753"
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
-
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ULTRA PRO MAX TRADING BOT V12 ONLINE 🚀"
+    return "ULTRA PRO MAX TRADING BOT V10 ONLINE 🚀"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -85,15 +79,20 @@ def calculate_macd(series):
 
 def get_binance_data(symbol, interval="1d", limit=60):
     try:
-        pair = f"{symbol.upper()}/USDT"
-        ohlcv = exchange.fetch_ohlcv(pair, timeframe=interval, limit=limit)
-        if ohlcv and len(ohlcv) > 26:
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-            return df
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}USDT&interval={interval}&limit={limit}"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            klines = response.json()
+            if klines and len(klines) > 26:
+                df = pd.DataFrame(klines, columns=[
+                    'open_time', 'open', 'high', 'low', 'close', 'volume', 
+                    'close_time', 'quote_asset_volume', 'trades', 'tb_base', 'tb_quote', 'ignore'
+                ])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                return df
     except Exception as e:
-        print(f"CCXT Error: {e}")
+        print(f"Error fetching binance data: {e}")
     return None
 
 def get_funding_rate(symbol):
@@ -108,7 +107,7 @@ def get_funding_rate(symbol):
 def generate_chart_image(df, symbol, interval):
     plt.figure(figsize=(8, 4))
     plt.plot(df['close'], label='Price', color='#00ffcc', linewidth=1.5)
-    plt.title(f"{symbol} - Timeframe: {interval}", color='white')
+    plt.title(f"{symbol} - {interval} Chart", color='white')
     plt.gca().set_facecolor('#1e1e1e')
     plt.gcf().patch.set_facecolor('#121212')
     plt.tick_params(colors='white')
@@ -127,6 +126,8 @@ def analyze_market(symbol, interval="1d"):
 
     price = df['close'].iloc[-1]
     open_price = df['open'].iloc[-1]
+    high = df['high'].iloc[-1]
+    low = df['low'].iloc[-1]
     change = ((price - open_price) / open_price) * 100
     trend = "🟢 صاعد" if change > 0 else "🔴 هابط"
 
@@ -134,6 +135,7 @@ def analyze_market(symbol, interval="1d"):
     macd_val, signal_val = calculate_macd(df['close'])
     funding = get_funding_rate(symbol)
 
+    # RSI status
     if rsi_val > 70:
         rsi_status = f"متشبع شراء ({rsi_val:.1f}) ⚠️🔥"
     elif rsi_val < 30:
@@ -141,9 +143,11 @@ def analyze_market(symbol, interval="1d"):
     else:
         rsi_status = f"متوازن ({rsi_val:.1f}) ⚖️"
 
+    # MACD status
     macd_status = "إيجابي / تقاطع صاعد 🟢" if macd_val > signal_val else "سلبي / تقاطع هابط 🔴"
 
-    bullish, bearish = (1 if change > 0 else 0), (0 if change > 0 else 1)
+    # Decision
+    bullish, bearish = 0, 1 if change > 0 else 0, 0 if change > 0 else 1
     if macd_val > signal_val: bullish += 2
     else: bearish += 2
 
@@ -174,15 +178,15 @@ def analyze_market(symbol, interval="1d"):
 
 def main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("₿ BTC [1d]", callback_data="an_btc"), InlineKeyboardButton("◎ SOL [1d]", callback_data="an_sol")],
-        [InlineKeyboardButton("Ξ ETH [1d]", callback_data="an_eth"), InlineKeyboardButton("⏱️ اختر الفريم (1h / 4h / غيره)", callback_data="tf_select_coin")],
+        [InlineKeyboardButton("₿ BTC Analysis", callback_data="an_btc"), InlineKeyboardButton("◎ SOL Analysis", callback_data="an_sol")],
+        [InlineKeyboardButton("Ξ ETH Analysis", callback_data="an_eth"), InlineKeyboardButton("📊 فريمات قصيرة (5m / 15m)", callback_data="tf_menu")],
         [InlineKeyboardButton("🔥 Market Sentiment", callback_data="hype"), InlineKeyboardButton("🔍 بحث عن عملة", callback_data="search_prompt")]
     ])
 
 async def start(update, context):
     if not allowed(update): return
     await update.message.reply_text(
-        "🚀 **AURA TRADING BOT V12 (PRO MAX)**\n\nاختر العملة أو الفريم المطلوب:",
+        "🚀 **AURA TRADING BOT V10 (PRO MAX)**\n\nاختر العملة أو الميزة المطلوبة:",
         reply_markup=main_keyboard(),
         parse_mode="Markdown"
     )
@@ -210,35 +214,22 @@ async def buttons(update, context):
             await query.edit_message_text("❌ حدث خطأ في جلب البيانات.", reply_markup=main_keyboard())
         return
 
-    if data == "tf_select_coin":
+    if data == "tf_menu":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("₿ BTC (اختر الفريم)", callback_data="coin_tf_BTC"), InlineKeyboardButton("◎ SOL (اختر الفريم)", callback_data="coin_tf_SOL")],
-            [InlineKeyboardButton("Ξ ETH (اختر الفريم)", callback_data="coin_tf_ETH")],
+            [InlineKeyboardButton("⚡ BTC [5m]", callback_data="tf_BTC_5m"), InlineKeyboardButton("⚡ BTC [15m]", callback_data="tf_BTC_15m")],
+            [InlineKeyboardButton("⚡ SOL [5m]", callback_data="tf_SOL_5m"), InlineKeyboardButton("⚡ SOL [15m]", callback_data="tf_SOL_15m")],
             [InlineKeyboardButton("🔙 القائمة", callback_data="home")]
         ])
-        await query.edit_message_text("📊 **اختر العملة باش تختار بعدها الفريم المناسب:**", reply_markup=kb, parse_mode="Markdown")
-        return
-
-    if data.startswith("coin_tf_"):
-        sym = data.split("_")[2]
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("5 دقائق [5m]", callback_data=f"tf_{sym}_5m"), InlineKeyboardButton("15 دقيقة [15m]", callback_data=f"tf_{sym}_15m")],
-            [InlineKeyboardButton("ساعة [1h]", callback_data=f"tf_{sym}_1h"), InlineKeyboardButton("4 ساعات [4h]", callback_data=f"tf_{sym}_4h")],
-            [InlineKeyboardButton("يومي [1d]", callback_data=f"tf_{sym}_1d")],
-            [InlineKeyboardButton("🔙 القائمة", callback_data="home")]
-        ])
-        await query.edit_message_text(f"🕒 **اختر الفريم الزمني لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
+        await query.edit_message_text("⚡ **اختر العملة والفريم القصير للسكالبينج:**", reply_markup=kb, parse_mode="Markdown")
         return
 
     if data.startswith("tf_"):
         _, sym, tf = data.split("_")
-        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf} مع توليد الشارت...")
+        await query.edit_message_text(f"⏳ جاري تحليل {sym} على فريم {tf}...")
         res = analyze_market(sym, tf)
         if res:
             msg, chart = res
             await query.message.reply_photo(photo=chart, caption=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
-        else:
-            await query.edit_message_text("❌ حدث خطأ.", reply_markup=main_keyboard())
         return
 
     if data == "search_prompt":
@@ -250,7 +241,7 @@ async def buttons(update, context):
         try:
             r = requests.get(FEAR_GREED_URL, params={"limit": 1}, timeout=10).json()
             item = r["data"][0]
-            await query.edit_message_text(f"🔥 **مؤشر الخوف والطمع (Fear & Greed):**\n`{item['value']}/100` ({item['value_classification']})", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
+            await query.edit_message_text(f"🔥 **مؤشر الخمع والطمع (Fear & Greed):**\n`{item['value']}/100` ({item['value_classification']})", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
         except:
             await query.edit_message_text("❌ خطأ.", reply_markup=main_keyboard())
 
@@ -259,13 +250,13 @@ async def handle_message(update, context):
     if context.user_data.get('waiting_for_coin'):
         coin = update.message.text.strip().upper()
         context.user_data['waiting_for_coin'] = False
-        await update.message.reply_text(f"⏳ جاري تحليل العملة {coin} على فريم اليوم...")
+        await update.message.reply_text(f"⏳ جاري تحليل العملة {coin}...")
         res = analyze_market(coin, "1d")
         if res:
             msg, chart = res
             await update.message.reply_photo(photo=chart, caption=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="home")]]))
         else:
-            await update.message.reply_text(f"❌ لم أتمكن من العثور على العملة {coin}.", reply_markup=main_keyboard())
+            await update.message.reply_text(f"❌ لم أتمكن من العثور على العملة {coin} أو حدث خطأ.", reply_markup=main_keyboard())
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
