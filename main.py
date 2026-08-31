@@ -65,11 +65,50 @@ async def start_web_server(application: Application):
     await site.start()
 
 # =========================================================
-# 3. محرك DexScreener (لعملات Hyperliquid و DEX)
+# 3. محرك جلب الأخبار (NEWS ENGINE)
+# =========================================================
+
+def fetch_news_sync(symbol):
+    """دالة جلب آخر الأخبار المالية للعملة"""
+    try:
+        yf_symbol = f"{symbol.upper()}-USD"
+        ticker = yf.Ticker(yf_symbol)
+        news_list = ticker.news
+        
+        if not news_list:
+            return f"ℹ️ لا توجد أخبار حديثة متوفرة حالياً لعملة {symbol.upper()}."
+            
+        msg = f"📰 **آخر أخبار وتطورات عملة {symbol.upper()}** 📡\n━━━━━━━━━━━━━━━━━━\n\n"
+        
+        # عرض آخر 4 مقالات إخبارية
+        for item in news_list[:4]:
+            title = item.get("title", "بدون عنوان")
+            publisher = item.get("publisher", "Yahoo Finance")
+            link = item.get("link", "")
+            
+            # توافق مع التحديثات الجديدة لهيكلة الأخبار
+            if "content" in item:
+                title = item["content"].get("title", title)
+                publisher = item["content"].get("provider", {}).get("displayName", publisher)
+                link = item["content"].get("canonicalUrl", {}).get("url", link)
+
+            msg += f"🔹 **{title}**\n"
+            msg += f"🏢 المصدر: `{publisher}`\n"
+            if link:
+                msg += f"🔗 [اضغط هنا لقراءة المقال كاملاً]({link})\n"
+            msg += "──────────────────\n"
+            
+        msg += "\n**إن شاء الله 🤲**"
+        return msg
+    except Exception as e:
+        logger.error(f"News error for {symbol}: {e}")
+        return f"❌ تعذر جلب الأخبار لعملة {symbol.upper()} في الوقت الحالي."
+
+# =========================================================
+# 4. محرك DexScreener (لعملات Hyperliquid و DEX)
 # =========================================================
 
 def fetch_dex_sync(symbol):
-    """جلب بيانات العملات اللامركزية من DexScreener"""
     url = f"https://api.dexscreener.com/latest/dex/search?q={symbol}"
     try:
         resp = requests.get(url, timeout=10).json()
@@ -102,7 +141,7 @@ def fetch_dex_sync(symbol):
         return f"❌ خطأ في الاتصال بـ DexScreener: {e}"
 
 # =========================================================
-# 4. محرك التحليل ورسم الشارت السحري (Yahoo Finance)
+# 5. محرك التحليل والتوقعات والشارت (Yahoo Finance)
 # =========================================================
 
 def allowed(update: Update) -> bool:
@@ -218,11 +257,14 @@ def fetch_yf_sync(symbol, timeframe):
         bearish_score = bear_score + (1 if change <= 0 else 0) + (2 if macd_val <= signal_val else 0) + (1 if rsi_val > 60 else 0)
 
         if bullish_score > bearish_score + 1:
-            decision = "🟢 **دخول LONG (شراء)** 🚀"
+            decision = "🟢 **القرار: دخول LONG (شراء)** 🚀"
+            prediction = f"🚀 **صعود متوقع:** الزخم إيجابي، السعر مرشح لاختبار المقاومة `{r1:,.2f}`. باختراقها يتجه إلى `{r2:,.2f}`."
         elif bearish_score > bullish_score + 1:
-            decision = "🔴 **دخول SHORT (بيع)** 📉"
+            decision = "🔴 **القرار: دخول SHORT (بيع)** 📉"
+            prediction = f"📉 **هبوط متوقع:** الضغط البيعي قوي، السعر مرشح للهبوط إلى الدعم `{s1:,.2f}` ثم `{s2:,.2f}`."
         else:
-            decision = "⚖️ **الانتظار والحياد (Wait)** ⏳"
+            decision = "⚖️ **القرار: الانتظار والحياد (Wait)** ⏳"
+            prediction = f"⚖️ **تذبذب عرضي:** السعر محصور بين الدعم `{s1:,.2f}` والمقاومة `{r1:,.2f}`. يُفضل انتظار الكسر."
 
         reasons = list(notes)
         reasons.append(f"▪️ RSI يدعم الشراء." if rsi_val < 40 else f"▪️ RSI قريب من التشبع." if rsi_val > 60 else "")
@@ -231,6 +273,7 @@ def fetch_yf_sync(symbol, timeframe):
         stats = {
             "symbol": symbol.upper(), "price": price, "change": change, "trend": trend,
             "rsi": rsi_status, "macd": macd_status, "decision": decision,
+            "prediction": prediction,
             "reasons": "\n".join([r for r in reasons if r]),
             "timeframe": timeframe, "r1": r1, "r2": r2, "s1": s1, "s2": s2
         }
@@ -260,15 +303,18 @@ async def create_signal_message(data):
         f"📊 الاتجاه: {data['trend']} (`{data['change']:.2f}%`)\n"
         f"📉 RSI: {data['rsi']} | 📈 MACD: {data['macd']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "📖 **دليل قراءة الشارت (للتوضيح):**\n"
-        "🟩 **الخط الأخضر:** يمثل مستوى الدعم (Support)\n"
-        "🟥 **الخط الأحمر:** يمثل مستوى المقاومة (Resistance)\n"
-        "⬆️ **سهم أخضر:** نموذج شرائي (إشارة دخول)\n"
-        "⬇️ **سهم أحمر:** نموذج بيعي (إشارة خروج)\n"
+        "📖 **دليل قراءة الشارت:**\n"
+        "🟩 **الخط الأخضر:** مستوى الدعم (Support)\n"
+        "🟥 **الخط الأحمر:** مستوى المقاومة (Resistance)\n"
+        "⬆️ **سهم أخضر:** نموذج شرائي (إشارة صعود)\n"
+        "⬇️ **سهم أحمر:** نموذج بيعي (إشارة هبوط)\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🧱 **مستويات الدعم والمقاومة:**\n"
         f"🔺 مقاومات (Resistance): `{data['r1']:,.2f}` | `{data['r2']:,.2f}`\n"
         f"🔻 دعومات (Support): `{data['s1']:,.2f}` | `{data['s2']:,.2f}`\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🔮 **التوقع المستقبلي (Pro Forecast):**\n"
+        f"{data['prediction']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"{data['decision']}\n\n"
         "🕯️ **الأسباب الفنية:**\n"
@@ -280,15 +326,15 @@ async def create_signal_message(data):
     )
 
 # =========================================================
-# 5. واجهة المستخدم (TELEGRAM HANDLERS)
+# 6. واجهة المستخدم (TELEGRAM HANDLERS)
 # =========================================================
 
 def main_keyboard():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔮 توقعات ذكية (شارت وتحليل)", callback_data="select_coin")],
         [InlineKeyboardButton("₿ BTC [1d]", callback_data="sig_BTC_1d"), InlineKeyboardButton("◎ SOL [1d]", callback_data="sig_SOL_1d")],
-        [InlineKeyboardButton("Ξ ETH [1d]", callback_data="sig_ETH_1d"), InlineKeyboardButton("⚡ سكالبينج [15m]", callback_data="sig_BTC_15m")],
-        [InlineKeyboardButton("⏱️ اختر العملة (شارت)", callback_data="select_coin"), InlineKeyboardButton("💎 Hyperliquid/DEX", callback_data="dex_menu")],
-        [InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
+        [InlineKeyboardButton("⚡ سكالبينج [15m]", callback_data="sig_BTC_15m"), InlineKeyboardButton("💎 Hyperliquid/DEX", callback_data="dex_menu")],
+        [InlineKeyboardButton("📰 آخر الأخبار (News)", callback_data="news_menu"), InlineKeyboardButton("🔥 Sentiment", callback_data="hype")]
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -320,7 +366,38 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         try: await query.message.delete()
         except: pass
-        await context.bot.send_message(chat_id=CHAT_ID, text="🪙 **اختر العملة للتحليل الفني:**", reply_markup=kb, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=CHAT_ID, text="🪙 **اختر العملة للحصول على التوقعات والشارت:**", reply_markup=kb, parse_mode="Markdown")
+
+    elif data == "news_menu":
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("₿ أخبار Bitcoin (BTC)", callback_data="news_BTC")],
+            [InlineKeyboardButton("◎ أخبار Solana (SOL)", callback_data="news_SOL")],
+            [InlineKeyboardButton("Ξ أخبار Ethereum (ETH)", callback_data="news_ETH")],
+            [InlineKeyboardButton("🔙 القائمة", callback_data="home")]
+        ])
+        try: await query.message.delete()
+        except: pass
+        await context.bot.send_message(chat_id=CHAT_ID, text="📰 **اختر العملة لقراءة أحدث أخبارها وتطوراتها:**", reply_markup=kb, parse_mode="Markdown")
+
+    elif data.startswith("news_"):
+        sym = data.split("_")[1]
+        loading_msg = await context.bot.send_message(chat_id=CHAT_ID, text=f"⏳ جاري جلب أحدث الأخبار لعملة {sym}...")
+        
+        news_text = await asyncio.to_thread(fetch_news_sync, sym)
+        
+        await loading_msg.delete()
+        try: await query.message.delete()
+        except: pass
+        
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            text=news_text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 تحديث الأخبار", callback_data=data), InlineKeyboardButton("🔙 رجوع للأخبار", callback_data="news_menu")]
+            ])
+        )
 
     elif data == "dex_menu":
         kb = InlineKeyboardMarkup([
@@ -356,7 +433,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         try: await query.message.delete()
         except: pass
-        await context.bot.send_message(chat_id=CHAT_ID, text=f"📊 **اختر الفريم لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=CHAT_ID, text=f"📊 **اختر الفريم لمعرفة التوقعات لـ {sym}:**", reply_markup=kb, parse_mode="Markdown")
 
     elif data.startswith("sig_"):
         _, sym, tf = data.split("_")
